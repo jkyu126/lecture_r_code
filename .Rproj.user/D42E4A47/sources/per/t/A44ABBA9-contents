@@ -1,0 +1,1228 @@
+---
+title: "\\large \\textbf{The role of a designated market maker in liquidity and price discovery}"
+author: "\\large Jinkyu Kim"
+date: "\\normalsize This draft: `r format(Sys.time(), '%Y-%m-%d')`" 
+documentclass: article
+geometry: margin=1in
+fontsize: 11pt
+indent: true #indentfirst
+subparagraph: yes #titlesec
+output: 
+  pdf_document:
+    number_sections: true
+    citation_package: natbib
+    keep_tex: true
+    include:
+      in_header: header.tex
+bibliography: references.bib
+biblio-style: apa
+thanks: |
+ **Current version**: `r format(Sys.time(), '%Y-%m-%d')`. Replication files can be provided on the author's Github account [(http://github.com/jkyu126/master_thesis)](http://github.com/jkyu126/master_thesis) upon request.
+#This is a joint work with Professor Kyounghun Bae (khbae@hanyang.ac.kr). 
+#Online appendix is available at  \href{http://github.com/jkyu126/master_thesis}{here}.
+  
+abstract: |
+  \noindent Employing the introduction of a designated market maker (DMM) to the Korean stock market as a natural experiment, this study investigates whether a DMM improves market quality in terms of liquidity and price discovery. Since the Korea Exchange (KRX) introduced DMMs to 40 stocks that were randomly assigned to 373 stocks labeled ``low liquidity,'' we compare the liquidity and pricing error before, during, and after the implementation of a DMM. By performing difference-in-difference tests, we document that spreads decrease 7 basis points more for treated stocks when a DMM is introduced and increase 5 basis points more after the termination of a DMM contract. Moreover, pricing error estimated by a random walk decomposition (see \cite{hasbrouck1993assessing}) decreases 2 basis points more for treated stocks at the introduction and increases 1 basis points more after termination. The results imply that DMMs improve overall market quality by enhancing liquidity and the price discovery process.
+
+
+---
+
+<!-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------ANALYSIS---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------->
+
+<!--\pagenumbering{gobble}-->
+
+```{r setup, include=FALSE}
+Sys.setlocale("LC_ALL","English")
+options(kableExtra.latex.load_packages = FALSE)
+library("kableExtra")
+library(stargazer)
+library(dplyr)
+library(tibble)
+library(knitr)
+library(lmtest)
+library(sandwich)
+library(plm)
+library(kableExtra)
+library(tidyr)
+library(ggplot2)
+library(MatchIt)
+library(data.table)
+library(lfe)
+library(GGally)
+library(dplyr)
+library(gridExtra)
+library(ggpubr)
+knitr::opts_chunk$set(cache=TRUE,
+                      message=FALSE, warning=FALSE,
+                      fig.path='figs/',
+                      cache.path = '_cache/'
+                      )
+
+jk_stargazer <- function(..., jknote = "", jkfontsize=9){
+  output <- capture.output(stargazer(...))[-1] #remove first row
+  output = output[!base::startsWith(output, "%")] #remove LaTeX alert
+  output = output[!base::startsWith(output, "\\textit{Note:}")] #remove Note line
+  output = c(output[1], #begintable
+             paste0("\\fontsize{", jkfontsize, "}{13}\\selectfont"), #fontsize
+             "\\begin{threeparttable}", #begin threeparttable
+             output[2:c(length(output)-3)], "\\hline", "\\end{tabular}", #maincontents
+    "\\begin{tablenotes}[flushleft]", "\\linespread{1.2}\\sizeeightfixed",
+    paste("\\item", jknote), "\\end{tablenotes}", "\\end{threeparttable}", "\\end{table}")
+  cat(paste(output, collapse = "\n"), "\n")
+}   
+
+jk_kable <- function(output, jknote = ""){
+  output = output[!base::startsWith(output, "\\end{table}")] #remove end table
+  begin = which(base::startsWith(output, "\\begin{tabu}")) #where is begin tabu
+  end = which(base::startsWith(output, "\\end{tabu}")) #where is end tabu
+  output = c(output[1:c(begin-1)], 
+             "\\begin{threeparttable}" , output[begin], "\\\\[2ex]", output[c(begin+1):end], "\\begin{tablenotes}[flushleft]", "\\linespread{1.2}\\footnotesize",
+             paste("\\item", jknote), "\\end{tablenotes}", "\\end{threeparttable}", "\\end{table}")
+  cat(paste(output, collapse = "\n"), "\n")
+}
+
+# DOUBLE CLUSTERING
+vcovDC = function(x, ...){
+  vcovHC(x, cluster="group", ...) + 
+    vcovHC(x, method=c("arellano"), type=c("sss"),cluster = c("time"), ...) - 
+    vcovHC(x, method="white1", ...)
+}
+table_font=9
+```
+
+<!----- T1. SUMMARY STATISTICS  ------>
+```{r, include=F}
+monthdat = read.csv("../01_data/monthdat.csv", stringsAsFactors = F)
+
+t1 = monthdat %>%
+  select(mm, espread:mktcap) %>% 
+  tidyr::gather(Varname, Var, espread:mktcap)%>%
+  group_by(mm, Varname) %>%
+  summarise(Mean = mean(Var, na.rm=T), Std = sd(Var, na.rm=T), Min=min(Var, na.rm=T), Max=max(Var, na.rm=T), Median=median(Var, na.rm=T)) %>% 
+  arrange(desc(mm), match(Varname, c("espread", "qspread", "rspread", "adv_selection", "amihud", "volatility", "volume", "dvolume",
+                           "price", "nr_trades", "ret", "mktcap"))) %>%
+  ungroup() %>%
+  select(-mm) %>%
+  as.data.frame()
+
+t1$Varname = rep(c("Effective Spread (%)", "Quoted Spread(%)", "Realized Spread(%)", "Adverse Selection(%)",
+               "ILLIQ (%/KRW 1M)", "Volatility(%)", "Volume (1,000 shares)", "Volume (KRW 1B)", "Price (KRW 1,000)",
+               "NumTrades", "Return (%)", "MktCap (KRW 1B)"),2)
+colnames(t1)[1]=" "
+
+mm_number = unique(monthdat %>% select(stock2, mm)) %>% group_by(mm) %>% summarise(n=n())
+
+```
+
+<!----- T2. Comparison  ------>
+```{r, include=FALSE}
+predat = monthdat %>% 
+  mutate(mm2 ="All") %>%  #generate duplicated "All" values
+  rbind(monthdat %>% mutate(mm2 = ifelse(mm==0, "NoDMM", "DMM"))) %>%   #row bind "DMM" and "NoDMM" values
+  filter(pre_mm==1) %>%   #only use pre-MM dataset
+  select(mm2, stock2, dg, espread:mktcap) %>%
+  group_by(mm2, stock2) %>%   #summary by stock
+  summarise_at(vars(espread:mktcap), ~mean(.)) %>% 
+  group_by(mm2) %>%   #summary by DMM
+  summarise(
+    espread = mean(espread),
+    qspread = mean(qspread),
+    rspread = mean(rspread),
+    adv_selection = mean(adv_selection),
+    amihud = mean(amihud),
+    volume = mean(volume),
+    dvolume = mean(dvolume),
+    nr_trades = mean(nr_trades),
+    price = mean(price),
+    ret = mean(ret),
+    volatility = mean(volatility, na.rm=T),
+    #autocorr =mean(autocorr),
+    mktcap = mean(mktcap),
+    #Ksq = mean(Ksq)*100,
+    nstock = length(unique(stock2))
+  ) %>% as.data.frame()
+
+t2 = predat %>% 
+  tidyr::gather(Varname, Var, espread:nstock) %>%
+  spread(mm2, Var) %>%
+  arrange(match(Varname, c("espread", "qspread", "rspread", "adv_selection", "amihud", "volatility", "volume", "dvolume",
+                           "price", "nr_trades", "ret",  "mktcap", "nstock"))) %>%
+  mutate(Diff = DMM - NoDMM) %>% 
+  mutate_at(vars(-Varname), ~round(., digits=2)) %>%
+  as.data.frame()
+
+names = t2$Varname[-nrow(t2)]
+pval = NULL
+for (i in names){
+  tmp = t.test(monthdat[[i]][monthdat$mm==1 & monthdat$pre_mm==1], monthdat[[i]][monthdat$mm==0 & monthdat$pre_mm==1])$p.value
+  pval = c(pval, ifelse(tmp<0.01, "***", ifelse(tmp<0.05, " **", ifelse(tmp<0.1, "  *", "   "))))
+}
+t2$Sig. = c(pval, "")
+t2$Varname = c("Effective Spread (%)", "Quoted Spread(%)", "Realized Spread(%)", "Adverse Selection(%)",
+               "ILLIQ (%/KRW 1M)", "Volatility(%)", "Volume (1,000 shares)", "Volume (KRW 1B)", "Price (KRW 1,000)",
+               "NumTrades", "Return (%)", "MktCap (KRW 1B)", "#Stocks")
+colnames(t2)[1]=" "
+colnames(t2)[4]="Non-DMM"
+```
+
+<!----- T3. PSM Match  ------>
+```{r, include=FALSE}
+
+psmdat = monthdat %>% 
+  filter(pre_mm==1) %>% #only pre-MM dataset
+  select(stock2, mm, espread, qspread, volume, price, mktcap) %>%
+  group_by(stock2) %>%  #group by stock
+  summarise_all(., mean)%>%
+  arrange(mm, stock2) %>%
+  column_to_rownames(var="stock2") %>%
+  as.data.frame()
+
+Sample.psm.out= matchit(mm ~ espread + qspread + volume + price + mktcap, 
+                        data = psmdat, method = 'nearest', distance = "logit", ratio  = 3)
+
+psm.out = Sample.psm.out$match.matrix %>% 
+  as.data.frame() %>%
+  rownames_to_column("Treatment") %>% 
+  tidyr::gather(match, Control, `1`:`3`) 
+
+psm.all = rbind(summary(Sample.psm.out)$sum.all[,c(1,2,4)], c(summary(Sample.psm.out)$nn[1,c(2,1)], NA)) %>%
+  mutate_all(~round(.,2)) %>%
+  rename(DMM = 'Means Treated', NoDMM = 'Means Control', Diff = 'Mean Diff') %>% 
+  remove_rownames() %>%
+  mutate(" " = c("Distance", "Effective Spread (%)", "Quoted Spread (%)", "Volume (1,000 shares)", "Price (KRW 1,000)", "MktCap (KRW 1B)", "#Stocks")) %>%
+  select(" ", DMM, NoDMM, Diff)
+
+psm.matched = rbind(summary(Sample.psm.out)$sum.matched[,c(1,2,4)], c(summary(Sample.psm.out)$nn[2,c(2,1)], NA)) %>% 
+  mutate_all(~round(.,2)) %>%
+  rename(DMM = 'Means Treated', NoDMM = 'Means Control', Diff = 'Mean Diff') %>% 
+  remove_rownames() %>%
+  mutate(" " = c("Distance", "Effective Spread (%)", "Quoted Spread (%)", "Volume (1,000 shares)", "Price (KRW 1,000)", "MktCap (KRW 1B)", "#Stocks")) %>% 
+  select(" ", DMM, NoDMM, Diff)
+
+psm.summary = rbind(psm.all, psm.matched)
+
+mdata <- match.data(Sample.psm.out)
+
+names = colnames(mdata)[2:6]
+  
+pval1 = pval2 = NULL
+for (i in names){
+  tmp1 = t.test(psmdat[[i]][psmdat$mm==1], psmdat[[i]][psmdat$mm==0])$p.value
+  pval1 = c(pval1, ifelse(tmp1<0.01, "***", ifelse(tmp1<0.05, " **", ifelse(tmp1<0.1, "  *", "   "))))
+  tmp2 = t.test(mdata[[i]][mdata$mm==1], mdata[[i]][mdata$mm==0])$p.value
+  pval2 = c(pval2, ifelse(tmp2<0.01, "***", ifelse(tmp2<0.05, " **", ifelse(tmp2<0.1, "  *", "   "))))
+}
+psm.summary$Sig. = c("***", pval1, "", "", pval2, "")
+colnames(psm.summary)[3] = "Non-DMM"
+```
+<!-- Filtered -->
+```{r, include=FALSE}
+filtdat = monthdat %>% filter(stock2 %in% psm.out$Treatment | stock2 %in% psm.out$Control)
+```
+
+<!--- Figure --->
+```{r plot, results='asis',echo=FALSE, message=FALSE, warning=FALSE, comment=FALSE}
+
+longdat = filtdat %>% 
+  mutate(mm = ifelse(mm==1, "DMM  ", "Non-DMM  "), 
+         period = ifelse(pre_mm==1, "before", ifelse(post_mm==1, "during", "after"))) %>%
+  mutate(period = base::factor(period, levels = c("before", "during", "after")), 
+         Group = base::factor(mm, levels = c("DMM  ", "Non-DMM  "))) %>%
+  select(Group, period, dg, 
+         espread, qspread, rspread, adv_selection, amihud, volatility, volume, dvolume, nr_trades) %>%
+  group_by(Group, period, dg) %>%
+  summarise_all(., mean) %>%
+  pivot_longer(cols=-c(Group, period, dg), names_to = "Varname", values_to = "Var") 
+
+plot0_1 = longdat %>% 
+  filter(Varname == "volume") %>%
+  ggplot(aes(x=period, y=Var, fill=Group)) +
+  geom_boxplot(outlier.shape = NA) +
+  scale_fill_manual(values=c("#69b3a2", "#E8E8E8") ) +
+  theme_bw() + 
+  theme(legend.position = "Default", plot.title = element_text(size=10), text = element_text(family = "Times New Roman")) +
+  xlab("") + ylab("volume(1,000 shares)") 
+
+plot0_2 = longdat %>% 
+  filter(Varname == "dvolume") %>%
+  ggplot(aes(x=period, y=Var, fill=Group)) +
+  geom_boxplot(outlier.shape = NA) +
+  scale_fill_manual(values=c("#69b3a2", "#E8E8E8") ) +
+  theme_bw() + 
+  theme(legend.position = "Default", plot.title = element_text(size=10), text = element_text(family = "Times New Roman")) +
+  xlab("") + ylab("dvolume(KRW 1M)") 
+
+plot1 = longdat %>% 
+  filter(Varname == "espread") %>%
+  ggplot(aes(x=period, y=Var, fill=Group)) +
+  geom_boxplot(outlier.shape = NA) +
+  scale_fill_manual(values=c("#69b3a2", "#E8E8E8") ) +
+  theme_bw() + 
+  theme(legend.position = "Default", plot.title = element_text(size=10), text = element_text(family = "Times New Roman")) +
+  xlab("") + ylab("espread(%)") 
+
+plot2 = longdat %>% 
+  filter(Varname == "qspread") %>%
+  ggplot(aes(x=period, y=Var, fill=Group)) +
+  geom_boxplot(outlier.shape = NA) +
+  scale_fill_manual(values=c("#69b3a2", "#E8E8E8") ) +
+  theme_bw() + 
+  theme(legend.position = "Default", plot.title = element_text(size=10), text = element_text(family = "Times New Roman")) +
+  xlab("") + ylab("qspread(%)") 
+
+plot3 = longdat %>% 
+  filter(Varname == "rspread") %>%
+  ggplot(aes(x=period, y=Var, fill=Group)) +
+  geom_boxplot(outlier.shape = NA) +
+  scale_fill_manual(values=c("#69b3a2", "#E8E8E8") ) +
+  theme_bw() + 
+  theme(legend.position = "Default", plot.title = element_text(size=10), text = element_text(family = "Times New Roman")) +
+  xlab("") + ylab("rspread(%)") 
+
+plot4 = longdat %>% 
+  filter(Varname == "adv_selection") %>%
+  ggplot(aes(x=period, y=Var, fill=Group)) +
+  geom_boxplot(outlier.shape = NA) +
+  scale_fill_manual(values=c("#69b3a2", "#E8E8E8") ) +
+  theme_bw() + 
+  theme(legend.position = "Default", plot.title = element_text(size=10), text = element_text(family = "Times New Roman")) +
+  xlab("") + ylab("advselect(%)")
+
+g = ggarrange(plot0_1, plot0_2, plot1, plot2, plot3, plot4, ncol=2, nrow=3, common.legend=T, legend = "bottom")
+ggsave(file=paste0("figs/fig1.png"), g, dpi=300, width=130, height=160, units="mm")
+
+g_present1 = ggarrange(plot0_1, plot0_2, plot1, plot2, ncol=2, nrow=2, common.legend=T, legend = "right")
+ggsave(file=paste0("figs/presentation/fig1.png"), g_present1, dpi=300, width=150, height=110, units="mm")
+
+
+```
+
+<!--- T4. DD Intro --->
+```{r fig.comparison, include=FALSE}
+
+# before->during
+regdat = filtdat %>% filter(post_mm2 != 1) %>% select(-c(sig.s:PE)) %>%
+           mutate(DMM=mm, post=post_mm, volume = volume/1000, volatility=volatility/100, price=price/1000)
+
+# Effective spread
+p.ols = plm(espread ~ I(DMM*post) + DMM + post,
+           model = "pooling", index = c("stock2", "dg"), data=regdat)
+intro.espread1 = coeftest(p.ols, vcov = function(x) vcovDC(x))
+p.ols = plm(espread ~ I(DMM*post) + DMM + post + price + volume + volatility,
+           model = "pooling", index = c("stock2", "dg"), data=regdat)
+intro.espread2 = coeftest(p.ols, vcov = function(x) vcovDC(x))
+p.ols = plm(espread ~ I(DMM*post) + price + volume + volatility + factor(stock2) + factor(dg) -1,
+            model="pooling", index = c("stock2", "dg"), data=regdat)
+intro.espread3 = coeftest(p.ols, vcov = function(x) vcovDC(x))
+int.espread.nobs = sum(summary(p.ols)$df[1:2])
+
+# Quoted spread
+p.ols = plm(qspread ~ I(DMM*post) + DMM + post,
+           model = "pooling", index = c("stock2", "dg"), data=regdat)
+intro.qspread1 = coeftest(p.ols, vcov = function(x) vcovDC(x))
+p.ols = plm(qspread ~ I(DMM*post) + DMM + post + price + volume + volatility,
+           model = "pooling", index = c("stock2", "dg"), data=regdat)
+intro.qspread2 = coeftest(p.ols, vcov = function(x) vcovDC(x))
+p.ols = plm(qspread ~ I(DMM*post) + price + volume + volatility + factor(stock2) + factor(dg) -1,
+            model="pooling", index = c("stock2", "dg"), data=regdat)
+intro.qspread3 = coeftest(p.ols, vcov = function(x) vcovDC(x))
+int.qspread.nobs = sum(summary(p.ols)$df[1:2])
+
+# Realized spread
+p.ols = plm(rspread ~ I(DMM*post) + DMM + post,
+           model = "pooling", index = c("stock2", "dg"), data=regdat)
+intro.rspread1 = coeftest(p.ols, vcov = function(x) vcovDC(x))
+p.ols = plm(rspread ~ I(DMM*post) + DMM + post + price + volume + volatility,
+           model = "pooling", index = c("stock2", "dg"), data=regdat)
+intro.rspread2 = coeftest(p.ols, vcov = function(x) vcovDC(x))
+p.ols = plm(rspread ~ I(DMM*post) + price + volume + volatility + factor(stock2) + factor(dg) -1,
+            model="pooling", index = c("stock2", "dg"), data=regdat)
+intro.rspread3 = coeftest(p.ols, vcov = function(x) vcovDC(x))
+int.rspread.nobs = sum(summary(p.ols)$df[1:2])
+
+# Adverse selection
+p.ols = plm(adv_selection ~ I(DMM*post) + DMM + post,
+           model = "pooling", index = c("stock2", "dg"), data=regdat)
+intro.adv1 = coeftest(p.ols, vcov = function(x) vcovDC(x))
+p.ols = plm(adv_selection ~ I(DMM*post) + DMM + post + price + volume + volatility,
+           model = "pooling", index = c("stock2", "dg"), data=regdat)
+intro.adv2 = coeftest(p.ols, vcov = function(x) vcovDC(x))
+p.ols = plm(adv_selection ~ I(DMM*post) + price + volume + volatility + factor(stock2) + factor(dg) -1,
+            model="pooling", index = c("stock2", "dg"), data=regdat)
+intro.adv3 = coeftest(p.ols, vcov = function(x) vcovDC(x))
+int.adv.nobs = sum(summary(p.ols)$df[1:2])
+
+# Amihud Illiquidity
+p.ols = plm(amihud ~ I(DMM*post) + DMM + post ,
+           model = "pooling", index = c("stock2", "dg"), data=regdat)
+intro.amihud1 = coeftest(p.ols, vcov = function(x) vcovDC(x))
+p.ols = plm(amihud ~ I(DMM*post) + DMM + post + price + volume + volatility,
+           model = "pooling", index = c("stock2", "dg"), data=regdat)
+intro.amihud2 = coeftest(p.ols, vcov = function(x) vcovDC(x))
+p.ols = plm(amihud ~ I(DMM*post) + price + volume + volatility + factor(stock2) + factor(dg) -1,
+            model="pooling", index = c("stock2", "dg"), data=regdat)
+intro.amihud3 = coeftest(p.ols, vcov = function(x) vcovDC(x))
+int.amihud.nobs = sum(summary(p.ols)$df[1:2])
+
+
+```
+
+<!---- T5. DD Leave ---->
+```{r, include=FALSE}
+
+# before->during
+regdat = filtdat %>% filter(pre_mm != 1) %>% 
+           mutate(DMM=mm, post=post_mm2, volume = volume/1000, volatility=volatility/100, price=price/1000)
+
+# Effective spread
+p.ols = plm(espread ~ I(DMM*post) + DMM + post,
+           model = "pooling", index = c("stock2", "dg"), data=regdat)
+leave.espread1 = coeftest(p.ols, vcov = function(x) vcovDC(x))
+p.ols = plm(espread ~ I(DMM*post) + DMM + post + price + volume + volatility,
+           model = "pooling", index = c("stock2", "dg"), data=regdat)
+leave.espread2 = coeftest(p.ols, vcov = function(x) vcovDC(x))
+p.ols = plm(espread ~ I(DMM*post) + price + volume + volatility + factor(stock2) + factor(dg) -1,
+            model="pooling", index = c("stock2", "dg"), data=regdat)
+leave.espread3 = coeftest(p.ols, vcov = function(x) vcovDC(x))
+lea.espread.nobs = sum(summary(p.ols)$df[1:2])
+
+# Quoted spread
+p.ols = plm(qspread ~ I(DMM*post) + DMM + post,
+           model = "pooling", index = c("stock2", "dg"), data=regdat)
+leave.qspread1 = coeftest(p.ols, vcov = function(x) vcovDC(x))
+p.ols = plm(qspread ~ I(DMM*post) + DMM + post + price + volume + volatility,
+           model = "pooling", index = c("stock2", "dg"), data=regdat)
+leave.qspread2 = coeftest(p.ols, vcov = function(x) vcovDC(x))
+p.ols = plm(qspread ~ I(DMM*post) + price + volume + volatility + factor(stock2) + factor(dg) -1,
+            model="pooling", index = c("stock2", "dg"), data=regdat)
+leave.qspread3 = coeftest(p.ols, vcov = function(x) vcovDC(x))
+lea.qspread.nobs = sum(summary(p.ols)$df[1:2])
+
+# Realized spread
+p.ols = plm(rspread ~ I(DMM*post) + DMM + post,
+           model = "pooling", index = c("stock2", "dg"), data=regdat)
+leave.rspread1 = coeftest(p.ols, vcov = function(x) vcovDC(x))
+p.ols = plm(rspread ~ I(DMM*post) + DMM + post + price + volume + volatility,
+           model = "pooling", index = c("stock2", "dg"), data=regdat)
+leave.rspread2 = coeftest(p.ols, vcov = function(x) vcovDC(x))
+p.ols = plm(rspread ~ I(DMM*post) + price + volume + volatility + factor(stock2) + factor(dg) -1,
+            model="pooling", index = c("stock2", "dg"), data=regdat)
+leave.rspread3 = coeftest(p.ols, vcov = function(x) vcovDC(x))
+lea.rspread.nobs = sum(summary(p.ols)$df[1:2])
+
+# Adverse selection
+p.ols = plm(adv_selection ~ I(DMM*post) + DMM + post,
+           model = "pooling", index = c("stock2", "dg"), data=regdat)
+leave.adv1 = coeftest(p.ols, vcov = function(x) vcovDC(x))
+p.ols = plm(adv_selection ~ I(DMM*post) + DMM + post + price + volume + volatility,
+           model = "pooling", index = c("stock2", "dg"), data=regdat)
+leave.adv2 = coeftest(p.ols, vcov = function(x) vcovDC(x))
+p.ols = plm(adv_selection ~ I(DMM*post) + price + volume + volatility + factor(stock2) + factor(dg) -1,
+            model="pooling", index = c("stock2", "dg"), data=regdat)
+leave.adv3 = coeftest(p.ols, vcov = function(x) vcovDC(x))
+lea.adv.nobs = sum(summary(p.ols)$df[1:2])
+
+# Amihud Illiquidity
+p.ols = plm(amihud ~ I(DMM*post) + DMM + post ,
+           model = "pooling", index = c("stock2", "dg"), data=regdat)
+leave.amihud1 = coeftest(p.ols, vcov = function(x) vcovDC(x))
+p.ols = plm(amihud ~ I(DMM*post) + DMM + post + price + volume + volatility,
+           model = "pooling", index = c("stock2", "dg"), data=regdat)
+leave.amihud2 = coeftest(p.ols, vcov = function(x) vcovDC(x))
+p.ols = plm(amihud ~ I(DMM*post) + price + volume + volatility + factor(stock2) + factor(dg) -1,
+            model="pooling", index = c("stock2", "dg"), data=regdat)
+leave.amihud3 = coeftest(p.ols, vcov = function(x) vcovDC(x))
+lea.amihud.nobs = sum(summary(p.ols)$df[1:2])
+
+```
+
+<!--- PE summary ----->
+```{r, include=F}
+
+pe = filtdat %>%
+  mutate(period = pre_mm + 2*post_mm + 3*post_mm2, sig.s = sig.s*100, sig.p = sig.p*100, PE=PE*100) %>%
+  select(mm, period, sig.s, PE) 
+
+t.pe = pe %>%
+  pivot_longer(cols = sig.s:PE, names_to = "Varname", values_to = "Var") %>%
+  group_by(mm, period, Varname) %>%
+  summarise(Mean = mean(Var, na.rm=T), Std = sd(Var, na.rm=T), Min=min(Var, na.rm=T), 
+            Max=max(Var, na.rm=T), Median=median(Var, na.rm=T)) %>%
+  arrange(desc(mm), match(Varname, c("sig.s", "PE"))) %>%
+  ungroup() %>%
+  mutate(mm = ifelse(mm==0, "NoDMM", "DMM"), 
+         period = ifelse(period==1, "Before", ifelse(period==2, "During", "After"))) %>%
+  select(Varname, period, Mean:Median) %>%
+  as.data.frame()
+
+
+t.pe$Varname = rep(rep(c("Market Quality ($\\sigma_s$)", "Normalized Market Quality ($\\sigma_s/\\sigma_p$)"), each=3),2)
+colnames(t.pe)[1]=" "
+
+```
+
+
+<!--- PE Figure --->
+```{r plot2, results='asis',echo=FALSE, message=FALSE, warning=FALSE, comment=FALSE}
+
+longdat2 = filtdat %>% 
+  mutate(sig.s = sig.s*100) %>%
+  mutate(mm = ifelse(mm==1, "DMM  ", "Non-DMM  "), 
+         period = ifelse(pre_mm==1, "before", ifelse(post_mm==1, "during", "after"))) %>%
+  mutate(period = base::factor(period, levels = c("before", "during", "after")), 
+         Group = base::factor(mm, levels = c("DMM  ", "Non-DMM  "))) %>%
+  select(Group, period, dg, 
+         sig.s, PE) %>%
+  group_by(Group, period, dg) %>%
+  summarise(sig.s = mean(sig.s, na.rm=T), PE = mean(PE, na.rm=T)) %>%
+  pivot_longer(cols=-c(Group, period, dg), names_to = "Varname", values_to = "Var") 
+
+plot2_1 = longdat2 %>% 
+  filter(Varname == "sig.s") %>%
+  ggplot(aes(x=period, y=Var, fill=Group)) +
+  geom_boxplot(outlier.shape = NA) +
+  scale_fill_manual(values=c("#69b3a2", "#E8E8E8") ) +
+  theme_bw() + 
+  theme(legend.position = "Default", plot.title = element_text(size=10), text = element_text(family = "Times New Roman")) +
+  xlab("") + ylab(expression(paste(sigma[s], " (%)"))) 
+
+plot2_2 = longdat2 %>% 
+  filter(Varname == "PE") %>%
+  ggplot(aes(x=period, y=Var, fill=Group)) +
+  geom_boxplot(outlier.shape = NA) +
+  scale_fill_manual(values=c("#69b3a2", "#E8E8E8") ) +
+  theme_bw() + 
+  theme(legend.position = "Default", plot.title = element_text(size=10), text = element_text(family = "Times New Roman")) +
+  xlab("") + ylab(expression(paste(sigma[s]/sigma[p], " (%)"))) 
+
+
+g2 = ggarrange(plot2_1, plot2_2, ncol=2, nrow=1, common.legend=T, legend = "bottom")
+ggsave(file=paste0("figs/fig2.png"), g2, dpi=300, width=130, height=60, units="mm")
+
+g_present2 = ggarrange(plot3, plot4, plot2_1, plot2_2, ncol=2, nrow=2, common.legend=T, legend = "right")
+ggsave(file=paste0("figs/presentation/fig2.png"), g_present2, dpi=300, width=150, height=100, units="mm")
+
+```
+<!-----PE regression------>
+```{r, include=FALSE}
+
+# before->during
+regdat = filtdat %>% filter(post_mm2 != 1) %>% drop_na() %>%
+           mutate(DMM=mm, post=post_mm, sig.s = sig.s*100, sig.p = sig.p*100, PE=PE*100, volume = volume/1000, volatility=volatility/100, price=price/1000)
+
+# Intro Sig.s
+p.ols = plm(sig.s ~ I(DMM*post) + DMM + post, model="pooling", index=c("stock2", "dg"), data=regdat)
+pe.s1 = coeftest(p.ols, vcov =function(x) vcovDC(x))
+obs.s1 = sum(summary(p.ols)$df[-3])
+
+p.ols = plm(sig.s ~ I(DMM*post) + DMM + post + price + volume , model="pooling", index=c("stock2", "dg"), data=regdat)
+pe.s2 = coeftest(p.ols, vcov =function(x) vcovDC(x))
+obs.s2 = sum(summary(p.ols)$df[-3])
+
+p.ols = plm(sig.s ~ I(DMM*post) + price + volume + factor(stock2) + factor(dg)  -1, model="pooling", index=c("stock2", "dg"), data=regdat)
+pe.s3 = coeftest(p.ols, vcov =function(x) vcovDC(x))
+obs.s3 = sum(summary(p.ols)$df[-3])
+
+# Intro PE
+p.ols = plm(PE ~ I(DMM*post) + DMM + post, model="pooling", index=c("stock2", "dg"), data=regdat)
+pe.pe1 = coeftest(p.ols, vcov =function(x) vcovDC(x))
+obs.pe1 = sum(summary(p.ols)$df[-3])
+
+p.ols = plm(PE ~ I(DMM*post) + DMM + post + price + volume, model="pooling", index=c("stock2", "dg"), data=regdat)
+pe.pe2 = coeftest(p.ols, vcov =function(x) vcovDC(x))
+obs.pe2 = sum(summary(p.ols)$df[-3])
+
+p.ols = plm(PE ~ I(DMM*post) + price + volume + factor(stock2) + factor(dg)  -1, model="pooling", index=c("stock2", "dg"), data=regdat)
+pe.pe3 = coeftest(p.ols, vcov =function(x) vcovDC(x))
+obs.pe3 = sum(summary(p.ols)$df[-3])
+
+
+regdat = filtdat %>% filter(pre_mm != 1) %>% drop_na() %>%
+            mutate(DMM=mm, post=post_mm2, sig.s = sig.s*100, sig.p = sig.p*100, PE=PE*100, volume = volume/1000, volatility=volatility/100, price=price/1000)
+  
+# Leave Sig.s
+p.ols = plm(sig.s ~ I(DMM*post) + DMM + post, model="pooling", index=c("stock2", "dg"), data=regdat)
+pe.s4 = coeftest(p.ols, vcov =function(x) vcovDC(x))
+obs.s4 = sum(summary(p.ols)$df[-3])
+
+p.ols = plm(sig.s ~ I(DMM*post) + DMM + post + price + volume , model="pooling", index=c("stock2", "dg"), data=regdat)
+pe.s5 = coeftest(p.ols, vcov =function(x) vcovDC(x))
+obs.s5 = sum(summary(p.ols)$df[-3])
+
+p.ols = plm(sig.s ~ I(DMM*post) + price + volume + factor(stock2) + factor(dg)  -1, model="pooling", index=c("stock2", "dg"), data=regdat)
+pe.s6 = coeftest(p.ols, vcov =function(x) vcovDC(x))
+obs.s6 = sum(summary(p.ols)$df[-3])
+
+# Intro PE
+p.ols = plm(PE ~ I(DMM*post) + DMM + post, model="pooling", index=c("stock2", "dg"), data=regdat)
+pe.pe4 = coeftest(p.ols, vcov =function(x) vcovDC(x))
+obs.pe4 = sum(summary(p.ols)$df[-3])
+
+p.ols = plm(PE ~ I(DMM*post) + DMM + post + price + volume, model="pooling", index=c("stock2", "dg"), data=regdat)
+pe.pe5 = coeftest(p.ols, vcov =function(x) vcovDC(x))
+obs.pe5 = sum(summary(p.ols)$df[-3])
+
+p.ols = plm(PE ~ I(DMM*post) + price + volume + factor(stock2) + factor(dg)  -1, model="pooling", index=c("stock2", "dg"), data=regdat)
+pe.pe6 = coeftest(p.ols, vcov =function(x) vcovDC(x))
+obs.pe6 = sum(summary(p.ols)$df[-3])
+
+
+```
+
+
+<!-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------ANALYSIS-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------->
+
+
+\clearpage
+# Introduction
+
+As a seminal paper, \cite{demsetz1968cost} argues that traders face a temporal mismatch between demand and supply even if they are willing to trade at the Walrasian equilibrium price. He claims that the presence of dealers or designated market makers (DMMs) in the market mitigates such trading mismatch. Since most security exchanges around the world now operate with an electronic limit order market in which any participant can effectively provide liquidity by non-marketable limit orders, the question arises whether DMMs are still valuable in the current market structure. Further, it poses the question whether DMMs can improve liquidity compared to endogenous liquidity provision formed by public limit orders.
+
+Theoretical approaches provide inconclusive answers to these questions. For instance, \cite{domowitz2002securities}, \cite{glosten1994electronic}, \cite{bloomfield2005make} support the view that liquidity providing can be entirely endogenous in a consolidated limit order book. Contrarily, \cite{seppi1997liquidity}, \cite{viswanathan2002market}, \cite{parlour2003liquidity} argue that DMMs can enhance the level of liquidity in limit order markets. These conflicting views in theoretical research have naturally resulted in increased empirical research. 
+
+Empirical research, however, has not presented the causal effect of a DMM in a clear and coherent manner. This is the case precisely because there are few structural changes related to a DMM, which creates laboratory settings that are far from ideal for testing causality. Notably, the primary empirical literature on DMMs focuses on European stock exchanges because a few European exchanges introduced a DMM over the past decades. For example, \cite{venkataraman2007value}, \cite{anand2009paying}, \cite{menkveld2013designated}, and \cite{skjeltorp2015listed} studied the introduction of DMM contracts in European stock markets (the Paris Bourse, the Stockholm Stock Exchange, Euronext Amsterdam, and the Oslo Stock Exchange, respectively) and found that DMM contracts enhance the level of liquidity. However, since DMM contracts have been voluntary to the discretion of firms in European exchanges, leaving endogenous concerns, it could not fully guarantee the causal effect of DMMs. To address the concern of selection bias and endogeneity, recent research focus on finding exogenous variation regarding DMM participation, thus referring to the New York Stock Exchange (NYSE). For example, \cite{clark2017designated} studied the NYSE’s halt induced by a technological malfunction on July 8, 2015. They showed that the shutdown widened bid-ask spread and argued that this effect stems from the unique characteristics of the NYSE, that is, the existence of DMMs. However, their evidence is indirect and the experiment potentially contains confounding effects attributable to unique NYSE characteristics as well as the effects of DMMs themselves. \cite{bessembinder2020liquidity} found that stocks with stronger DMM contract obligations experience improved liquidity, exploiting the difference in the NYSE DMM obligation and compensation across stocks as exogenous variation.\footnote{According to \cite{bessembinder2020liquidity}, as per the NYSE Rule 104, DMMs are (1) required to maintain orders at the NBBO more frequently and (2) receive larger rebates for supplying liquidity for securities where the prior month’s average daily volume was less than the threshold level of 1 million shares.} However, such literature varies from our research in that the authors investigated how a DMM participation rate affects market quality---assuming the presence of DMMs. While we, on the other hand, test how the presence of a DMM itself affects market quality.
+
+Our research addresses how DMMs affect market quality in terms of liquidity and price discovery by employing an exchange-designed exogenous shock as a natural experiment. Specifically, the Korea Exchange (KRX) introduced a DMM to 40 stocks that were randomly assigned to 373 stocks labeled ``low liquidity.’’ This is the first experiment in which an exchange intentionally designed a structural change to test a DMM’s role in improving market quality. Moreover, the introduction only lasted for 9 months, thus enabling us to test the effect a DMM has on market quality at two key junctures: the introduction phase and the termination phase. This is the ideal laboratory setting to test the causal effect of whether a DMM improves market quality.
+
+An important advantage of the DMM experiment in the Korean stock market is that the exchange plays a significant role in design and implementation, while participant firms and market makers do not possess discretion, thus alleviating concerns for endogeneity. The attenuated concern of endogeneity differentiates our study from other studies in Europe. For example, in the experiments of the Paris Bourse and Euronext (\cite{venkataraman2007value}; \cite{menkveld2013designated}), the firms endogenously decide to contract with multiple DMMs. In our experiment, participant firms do not have any discretion over the introduction of a DMM. Rather, the exchange plays a key role in categorizing stocks by liquidity, selecting target stocks within a ``low liquid'' category, evaluating potential market makers, selecting DMMs, constructing stock baskets that equalize the burden of market making, and compensating DMMs by way of incentives and exemption from commission. The only discretionary power other participants have over the process is that DMMs can choose the stock basket in which they will serve from among a set of stock baskets that the exchange has already constructed. (The process of assigning stocks to stock baskets is explained in Appendix B.) Furthermore, in the Korean DMM experiment, each stock has only one DMM that exclusively retains the market-making right to assigned stocks. This prevents competition between multiple DMMs, thus showing clear results without the compound effect induced by competition.
+
+The current experiment setting suggests proximity to a natural experiment; however, we do not claim that our experiment is completely free from endogeneity. Certainly, the experiment does not suffer from endogenous timing bias, as the implementation decision is exclusively made by the exchange. In principle, our experiment also does not suffer from endogenous selection bias, because the exchange exogenously selects target firms from low liquid stocks. However, we find that there are differences in the characteristics between stocks that implement a DMM and those that do not. Therefore, we complement the experiment by matching the treatment group and the control group according to characteristics. Also, we study both effects of DMMs at the introduction and termination phase. Overall, difference-in-difference tests using natural experiments, and augmented by propensity score matching and two-way evidence, enable us to estimate the causal effect of DMM participation on market quality.
+
+# Data and Institutional Details
+
+This section delineates key institutional details of the KRX’s DMM system and describes the data samples.
+
+## Institutional Details
+
+In 2016, the stock exchange in Korea introduced a DMM to low liquid stocks listed on the exchange for nine months from March to December 2016. This was the first attempt to implement an official market maker system in the South Korea stock market. Within the extant market structure, orders are processed between 9 a.m. and 3 p.m. to a limit order book in which all orderflows are observable. Trading takes place in a continuous auction market for most liquid stocks and in a single price auction for extreme illiquidity. The goal of implementing a DMM is to promote the trading behavior of low liquid stocks in a continuous auction market. We find that the experiment is good laboratory practice for testing the role of a market maker.
+
+The procedure of our experiment is as follows. First, the exchange categorizes 373 firms as low liquid among all stocks listed on the exchange and recruits potential market makers. During the process, potential market makers (usually broker firms) review the list of 373 low liquid stocks and decide whether to participate as a DMM or not, unaware of which specific stocks will be assigned to them. Upon receiving all applications, the KRX performs an evaluation and generates a market maker score. In 2016, two broker firms (NH Investment and Daewoo Investment) were selected based on the score, and the DMM with the highest score receives the preference to select a stock basket. Two stock baskets are formulated by the exchange with 40 stocks selected from 373 low liquid stocks. The specific rule for the selection of the 40 stocks is not disclosed. The difficulty of market making is equalized across stock baskets in terms of liquidity and the potential for hedging.
+
+The requirements for DMMs include, similar to the specialists in the NYSE, maintaining a fair and orderly stock market, to quote at the BBO (the Best-Bid-Offer, as there is a single exchange in Korea) a specified percentage of the time, and to facilitate price discovery throughout the day. However, DMMs' requirements in the Korean stock market are stricter than those of specialists. For example, DMMs are required to maintain spreads within prespecified ticks, while quoting a bid and ask simultaneously in the specified percentage of regular markets. To compensate for these requirements, DMMs benefit from tax and commission exemptions from the exchange, additional incentives based on performance, and side benefits such as additional consideration for DMM positions for the following year. The requirements and benefits of DMMs are further specified in Appendix C.
+
+## Data and Samples
+
+
+\begin{center} \textbf{Insert \autoref{fig:timeline} here} \end{center}
+
+
+In the analysis, we employ intraday trading datasets provided by the Korea Exchange (which is the unique exchange in Korea). Further, this study complements the intraday trading datasets with the adjusted closing price and share outstanding information extracted from DataGuide (equivalent to Wharton Research Data Services in the U.S.).
+
+In the experiment, the Korea exchange categorized 373 common stocks as low liquid among the total stocks listed on the exchange. Within 373 low liquidity stocks, the exchange selects 40 firms to implement a DMM for nine months (March 28 to December 31, 2016) which are treatment stocks in our analysis. This study appoints the remaining 332 firms that do not implement a DMM as control groups.\footnote{Trading of one stock is halted because of a company merger.} In the study, we compare the difference in liquidity and price discovery between the 40 DMM treatment stocks and the 332 non-DMM control stocks over the period before the introduction (July 2015---March 2016), during the implementation (March---December 2016), and after the termination (January---September 2017). Each period includes nine months.
+
+
+# Preliminary Analysis
+
+## Liquidity Measures
+
+We use intraday transaction data to obtain bid and ask quotes, and to calculate liquidity measures such as effective spread and quoted spread. Effective spread is decomposed into adverse selection and realized spread. The illiquidity measure proposed by \cite{amihud2002illiquidity} is also calculated using adjusted stock prices obtained from DataGuide. 
+
+### Effective Spread {-}
+We define the daily effective spread as the volume-weighted average of:
+\begin{equation}
+  \label{eq:espread}
+  espread_{it} = 2 q_{it}(p_{it}-m_{it})/m_{it},
+\end{equation}
+where $i$ is a stock index, $t$ is an index of each intraday transaction, $p_{it}$ is a price, and $m_{it}$ is the mid-point of the best bid and the best ask quote prevailing at the time of transaction. The direction of a trade $q_{it}$ is considered the buy ($q_{it}=1$) when the order that closed the deal is the buy, and otherwise the sell ($q_{it}=-1$).
+
+Succeeding \cite{huang1996dealer}, we split the effective spread into two components, that is, adverse selection component and the realized spread component. Each liquidity component captures a different microstructure effect. First, the adverse selection part captures the average loss while providing liquidity. Since a part of orderflows are informationally motivated, a liquidity provider suffers a loss from the adverse price movement after the informationally motivated trades. This can be measured by an adverse selection component. It is calculated as the difference between the current mid-quote price $m_{i,t}$ and the future mid-quote price $m_{i,t+k}$ which impounds the information contained at the time-$t$ orderflow. Specifically, the adverse selection is measured as:
+
+\begin{equation}
+  \label{eq:advselect}
+  adv\_selection_{it} = 2 q_{it}(m_{i,t+15min}-m_{it})/m_{it},
+\end{equation}
+where $m_{i,t+15min}$ is a mid-quote price 15 minutes after the trade. We employ a 15-minute time frame following the tradition of \cite{menkveld2013designated}. Further, the realized spread—the remaining part of the effective spread after deducting the adverse selection component—can be viewed as the ``real'' profit of a representative liquidity provider. The decomposition enables us to distinguish whether the variation of spread stems from the reduction of informed trades or from the decrease in profit in liquidity providing. Formally, the realized spread is defined as:
+
+\begin{equation}
+  \label{eq:rspread}
+  rspread_{it} = 2 q_{it}(p_{i,t}-m_{i,t+15min})/m_{it}.
+\end{equation}
+
+### Amihud's Illiquidity Measure{-}
+The illiquidity measure proposed by \cite{amihud2002illiquidity} is also calculated. Based on the daily adjusted price and traded volume, Amihud's illiquidity measure is calculated as:
+
+\begin{equation}
+  \label{eq:amihud}
+  ILLIQ_{it} = \frac{|r_{it}|}{volume_{it}},
+\end{equation}
+where $r_{it}$ is a percentage return from day $t-1$ to day $t$ and $volume_{it}$ is the dollar volume (KRW 1 billion). Amihud's illiquidity is a convenient but rough proxy for illiquidity since it captures how much return varies per unit of volume. 
+
+
+### Quoted Spread{-}
+For intraday transactions, we calculate the time duration between each transaction per stock. Then the daily quoted spread is the time-weighted average of:
+
+\begin{equation}
+  \label{eq:qspread}
+  qspread_{it} = (ask_{it}-bid_{it})/m_{it},
+\end{equation}
+where $t$ is a time index of intraday trading. 
+
+After calculating daily variables, we winsorize all variables in the sample at 1\% and 99\%. That is, we replace values larger than 99\% quantile to 99\% quantile value, and values smaller than 1\% quantile to the value of 1\% quantile.
+
+
+## Summary Statistics
+
+
+\begin{center} \textbf{Insert \autoref{tab:summary.all} here} \end{center}
+
+
+\autoref{tab:summary.all} reports the summary statistics for the monthly panel dataset, which includes the sample period of 27 months from July 2015 to September 2017. The dataset contains 40 stocks that are assigned a DMM (Panel A) and 332 stocks that are not assigned (Panel B) one. Among all 373 stocks, one stock is excluded from the analysis because of the merge, thus 372 firms remain as our sample dataset. The table leads to several observations. First, the market capitalization of firms is small. The average size of 40 DMM firms equates to KRW 168 billion (roughly USD 136 million) and that of 332 non-DMM firms totals KRW 94 billion (roughly USD 77 million). Second, our samples maintain effective spread and quoted spread around 50 basis points, which are more liquid than the small-cap samples of \cite{menkveld2013designated} in which they report the average effective spread of Euronext small-cap stocks around 1.5\%. Third, the effective spread is greater than the quoted spread. This is not a widely reported phenomenon and the reverse relation is, in fact, prevalent due to the intraday trading pattern. Because of trading externality, when more trading occurs at a specific time, the lower the spread. In turn, it leads to further trading demand because of the lower spread, which once again lowers the spread. Likewise, the volume-weighted effective spread is usually lower than the time-weighted quoted spread because the lower spread is concentrated at a time when a high trading volume occurs. However, the effective spread is larger than the quoted spread in our sample. Fourth, according to the effective spread breakdown, realized spread constitutes only a quarter of the effective spread, implying that the actual compensation to liquidity providers is 25\% of the spread and the remaining 75\% is the offset amount of the losses from informed trades.
+
+Overall, even though the KRX randomly assigns a DMM to stocks in a low liquid cohort, the trading behavior of DMM firms and non-DMM firms seems to be quite different. For example, the effective spread differs by 30\% (DMM: 47 bp, non-DMM: 61 bp), the price of DMM stocks is twice as high as non-DMM stocks (DMM: KRW 25 k, non-DMM: KRW 10 k), the volume of DMM firms exceeds non-DMM firms by more than 20\% (DMM: 229 k shares, non-DMM: 186 k shares), and the market capitalization of DMM stocks is roughly twice as that of non-DMM stocks (DMM: KRW 168 billion, non-DMM: KRW 94 billion). These differences in characteristics suggest the necessity to augment the randomness of the experiment, albeit the process was actually random.
+
+
+## Univariate Analysis
+
+
+\begin{center} \textbf{Insert \autoref{tab:summary.comparison} here} \end{center}
+
+
+\autoref{tab:summary.comparison} summarizes the stock characteristics of the treatment and control groups for the nine months prior to the introduction of a DMM (July 2015–March 2016). The test dataset is 40\*9 stock-month observations for DMM stocks (second column) and 332*9 stock-month observations for non-DMM stocks (third column). Though it might not be the result of systematic bias or intentional choice, \autoref{tab:summary.comparison} shows significant differences in stock characteristics between DMM and non-DMM stocks before the introduction of a DMM. Firstly, DMM stocks are more liquid than non-DMM stocks; DMM stocks have lower effective spread, quoted spread, realized spread, and adverse selection compared to non-DMM stocks, which is significant at the 0.1\% level, respectively. Similarly, the Amihud illiquidity measure is also lower for DMM stocks. Secondly, non-DMM stock prices are more volatile than DMM stocks. Further, trading is more active in DMM stocks. The dollar traded volume per day is 1.06 (KRW 1 billion) for DMM stocks, which is higher than non-DMM stocks of 0.6 (KRW 1 billion). The average price level for DMM stocks is KRW 249,100 and that of non-DMM stocks is KRW 98,300. Lastly, the market capitalization of DMM stocks almost doubles the market cap of non-DMM stocks. Overall, the table indicates that DMM stocks on average seem to constitute bigger and more liquid firms compared to non-DMM stocks. Thus, we select comparable control stocks in 332 non-DMM stocks whose characteristics are similar to those of DMM stocks.
+
+
+## Propensity Score Matching
+
+
+\begin{center} \textbf{Insert \autoref{tab:summary.matched} here} \end{center}
+
+
+Considering the difference in characteristics between the treatment and control stocks, we use propensity score matching that restrict the control stocks to match the treatment stocks. Since the research focuses on liquidity effects, we include the stock characteristics that represent stock liquidity and other factors before the introduction of a DMM. To estimate the propensity score, we estimate the logit model as follows:
+\begin{equation}
+  \label{eq:logit}
+  P(DMM_i=1) = \Phi\left(\beta_0 + \beta_1 espread_i + \beta_2 qspread_i + \beta_3 volume_i + \beta_4 price_i + \beta_5 mktcap_i \right),
+\end{equation}
+where $DMM_i$ is a dummy for DMM stocks and $\Phi$ is a logit distribution. Subsequently, we apply the $k$-nearest neighbor matching algorithm and specify three control firms for each of the treatment firms. As a result, the sample firms consist of 40 DMM treatment firms and 120 Non-DMM control firms.
+
+\autoref{tab:summary.matched} compares the characteristics of stocks for all samples (Panel A) and matched samples (Panel B). According to Panel A, the distance calculated in \autoref{eq:logit} differs by 0.15, which is significant at the 0.1\% level. Moreover, effective spread, quoted spread, price, and market capitalization differ between treatment and control stocks significantly at the 0.1\% level. The summary in Panel B shows that the differences disappear between treatment firms and control firms after the matching process, which guarantees proper comparison between treatment and control stocks.
+
+
+# The Change in Liquidity
+\label{sec:liquidity-change}
+
+\autoref{sec:liquidity-change} aims to investigate whether the introduction of a DMM improves stock liquidity. In this section, we perform difference-in-difference tests in liquidity for the implementation of a DMM. We compute monthly liquidity variables and compare how the difference in stock liquidity between treatment and control firms changes over different periods. Specifically, we present the unconditional variation of liquidity between treatment and control firms across periods in \autoref{sec:diagnostics} and further report statistical results from difference-in-difference tests in \autoref{sec:diff-in-diff}. 
+
+## Diagnostics
+\label{sec:diagnostics}
+
+
+\begin{center} \textbf{Insert \autoref{fig:liquidity} here} \end{center}
+
+
+\autoref{fig:liquidity} reports a boxplot of 6 liquidity variables including share volume (\emph{volume}), dollar volume (\emph{dvolume}), effective spread (\emph{espread}), quoted spread (\emph{qspread}), realized spread (\emph{rspread}), and adverse selection (\emph{advselect}) for the entire 27-month sample period (July 2015---September 2017). Each sample period includes 9 months of subsamples before (July 2015---March 2016), during (April---December 2016), and after (January---September 2017) the implementation of a DMM.
+
+\autoref{fig:liquidity} presents several observations. The first row presents the share volume and dollar volume of the DMM implementation. According to the figure, the difference in share volume and dollar volume between the treatment and control groups increased in the \emph{during} period compared to the \emph{before} and \emph{after} periods. Second, in the case of effective spread and quoted spread in the second row, the effective spread (\emph{espread}) in the treatment and control group is negligible before a DMM is introduced, but during the implementation, the effective spread of DMM treatment stocks show a noticeable decrease compared to non-DMM stocks, which diminishes after the termination.
+
+The third row presents interesting figures regarding realized spread and adverse selection. As observed, the effective spread (which includes two components: realized spread and the adverse selection) in the second row of the treatment firms experience a more significant decrease during the implementation. Since the realized spread and the adverse selection mathematically add up to effective spread precisely, the realized spread or adverse selection alone, or the combination of realized spread and adverse selection must explain the variation of effective spread. According to the figure, the realized spread shows a significant decrease during the implementation while the adverse selection shows the opposite, which implies that the potential source of the effective spread variation could be a realized spread. Although more sophisticated statistical tests are required which are performed in the following analyses, the figure suggests that the decrease in the spread could be due to the decrease in profit from liquidity supply, not due to the decrease in informed trading.
+
+## Difference-in-Difference Results
+\label{sec:diff-in-diff}
+
+We estimate the following difference-in-difference model with monthly panel dataset: 
+\begin{equation}
+  \label{eq:dd.intro}
+  y_{it} = \alpha_{i} + \beta_1  DMM_i*Post_t +\beta_2 DMM_i + \beta_3 Post_t + \beta_4 X_{it} + \gamma_t + \epsilon_{it},
+\end{equation} 
+where $i$ indicates firms, $t$ indicates months, $\alpha_i$ is a fixed effect, $Post_t$ is a time dummy which indicates the post-event period, $DMM_i$ is a dummy for the treatment group, $X_{it}$ indicates control variables including the price, volume, and volatility, $\gamma_t$ is a dummy for each month, and $\epsilon_{it}$ is a residual term. Within the analysis, we perform difference-in-differences tests for the implementation of a DMM while comparing differences between treatment and control groups across periods: (i) before---during and (ii) during---after.
+
+### DMM Introduction
+\label{sec:dd.intro}
+
+We compare the difference in monthly liquidity variables between 40 DMM stocks and 120 matched non-DMM stocks with the DMM introduction. The sample consists of 160\*9 stock-month observations of the \emph{before} period and 160\*9 stock-month observations of the \emph{during} period. The sample period of the \emph{before} and the \emph{during} period ranges from July 2015---March 2016 and April---December 2016, respectively. In the analysis, $Post_t$ in \autoref{eq:dd.intro} is a dummy with value 1 with the inclusion of the time in the during period, and 0 otherwise. Standard errors are adjusted for both firm and time clustering as per \cite{thompson2011simple} for the remaining correlation in residual terms. In the setting of \autoref{eq:dd.intro}, $\beta_1$ captures the difference-in-difference test effect.
+
+
+\begin{center} \textbf{Insert \autoref{tab:dd.intro} here} \end{center}
+
+
+\autoref{tab:dd.intro} shows that the liquidity of DMM treatment stocks improves more compared to that of non-DMM stocks in the implementation. In models (1), the difference-in-difference coefficient $\beta_1$ is -0.08, which is significant at the 0.1\% level, indicating that the effective spread decreases 8 basis points additionally for DMM stocks than for non-DMM stocks during the implementation. Model (2) and (3) confirm that the results are robust to adding control variables and fixed effects. Similarly, the coefficients in models (4) to (6) are -0.08, which are significant at the 0.1\% level, suggesting that the quoted spreads also decrease an additional 8 basis points for DMM stocks than non-DMM stocks. The decrease of 8 basis points in the effective spread and the quoted spread is roughly a 15\% improvement in liquidity considering that the original level of the effective spread is around 55 basis points and that of the quoted spread is 50 basis points as per \autoref{fig:liquidity}. Further, the effective spread breakdown from models (7) to (12) shows that the coefficient of the realized spread is -0.07, which is significant at the 0.1\% level while that of adverse selection is insignificant. This confirms the previous conjecture that the main source of the variation of spread is the profit of liquidity suppliers, not informed trading. Specifically, models (7) to (9) show that the realized spread decreases 7 basis points for treatment stocks in addition to control stocks after the introduction of a DMM, while no coefficient of adverse selection in models (10) to (12) shows statistical significance. The illiquidity measure proposed by \cite{amihud2002illiquidity} shows a negative value in models (13) and (15), which are significant either at 1\% or 5\% level. 
+
+### DMM Termination
+\label{sec:dd.leave}
+
+We present further evidence regarding the effect of market makers in liquidity. If a DMM truly affects liquidity, the liquidity improvement should disappear after the termination when market makers are no longer active. In \autoref{sec:dd.leave}, we aim to provide further augmented empirical evidence by testing the DMM effects on liquidity when they leave the market. In this section, we compare the difference in monthly liquidity variables between 40 DMM firms and 120 matched non-DMM firms at the DMM termination. The sample consists of 160\*9 stock-month observations of the \emph{during} period and 160\*9 stock-month observations of the \emph{after} period. The sample of during and after period ranges from April---December 2016 and January---September 2017, respectively. In the analysis, $Post_t$ in \autoref{eq:dd.intro} is a dummy with the value 1 if the time is included in the \emph{after} period, and 0 otherwise. Similarly, standard errors are corrected for both firm and time clustering.
+
+
+\begin{center} \textbf{Insert \autoref{tab:dd.leave} here} \end{center}
+
+
+The results in \autoref{tab:dd.leave} show that the liquidity of DMM treatment stocks decreased more compared to non-DMM stocks at the termination. In models (1) to (3), the difference-in-difference coefficient $\beta_1$ is 0.05, which is significant at the 0.1\% level, meaning that the effective spread increases 5 basis points for DMM stocks in addition to non-DMM stocks after the termination of a DMM. Similar to previous results, the coefficients of the quoted spread in models (4) to (6) is 0.06, indicating that the quoted spread increases for treatment stocks compared to non-DMM stocks after termination. The increase of 5 and 6 basis points in the effective and quoted spread is roughly 10\% degeneration in liquidity considering the level of liquidity during the implementation periods, which are roughly 48 basis points and 42 basis points, respectively. Further, the results from models (7) to (12) suggest that the realized spread increased 6 basis points and the adverse selection decreased 1 basis point (which is insignificant) for DMM stocks compared to non-DMM stocks after termination, which supports the hypothesis that the realized spread plays a key role in the decrease in the effective spread. Overall,  \autoref{tab:dd.leave} strongly supports the claim that (i) the implementation of a DMM improves liquidity, and (ii) the reason for such liquidity (or transaction cost) enhancement is the reduction of profits in liquidity provision and not informed trading. The \autoref{tab:dd.leave} augments the results in \autoref{tab:dd.intro}.
+
+
+# The Change in Price Discovery
+\label{sec:pe}
+
+Another focus of the study is to test whether the DMM implementation enhances the price discovery process in the market. To test the hypothesis, we employ the measure suggested by \cite{hasbrouck1993assessing}. Our approach in this section is similar to our approach in \autoref{sec:liquidity-change}. First, we compute the monthly measure of pricing error for all stocks and compare how the difference in price discovery between treatment and control stocks changes across periods. In \autoref{sec:pe.measure}, we present a brief description of the price discovery measure of \cite{hasbrouck1993assessing}. Then, the paper summarizes the descriptive statistics in \autoref{sec:pe.summary} and reports the difference-in-difference test results in \autoref{sec:pe.dd}.
+
+## The Measure of Price Discovery
+\label{sec:pe.measure} 
+
+In the analysis of price discovery, this study employs the measure of pricing error proposed by \autoref{sec:pe.measure}. Basically, the technique decomposes a time-series into a random-walk component and the remaining stationary component. When the decomposition applies to a security price, the random walk component can be considered an implied efficient (or fair) price, because the price follows random walk assuming price efficiency (that is, when the price incorporates all the information available). Therefore, the remaining stationary process calculated as the difference of the actual price process and the random walk component can be considered a pricing error which impounds diverse information-correlated microstructure effects (such as adverse-selection and lagged adjustment to information) and information-uncorrelated effects (such as price discreteness, temporary liquidity effects, and noise-trading). Specifically, the model breaks down the logarithm of a transaction price $p_t$ into two components $m_t$ and $s_t$ as follows:
+
+\begin{equation}
+  \label{eq:decompose.p}
+  p_t = m_t + s_t,
+\end{equation} 
+where $m_t$ is an efficient price that follows a martingale and $s_t$ is the pricing error that measures the deviation of the actual transaction price $p_t$ from the efficient price $m_t$. Therefore, the standard deviation of the pricing error $\sigma_s$ characterizes how much an actual transaction price deviates from the implied efficient price, thus measuring the average price inefficiency that arises in the market. In the analysis, the variables of interest include $\sigma_s$, the pricing error, and $\sigma_s/\sigma_p$, the pricing error divided by the standard deviation of the undecomposed price series.
+
+As a further specification, $m_t$ and $s_t$ can be expressed as \autoref{eq:decompose.m} and \autoref{eq:decompose.s} as follows:
+
+\begin{equation}
+  \label{eq:decompose.m}
+  m_t = m_{t-1} + w_t.
+\end{equation} 
+Since $m_t$ is a martingale process by construction, $w_t$ is a serially uncorrelated increment. That is, $E(w_t)=0$, $\sigma^2(w_t) = \sigma_w^2$ and $\gamma_k=E(w_t w_{\tau})=0$ for $t \neq \tau$. The term $w_t$ can be also thought of as the price update reflecting the information set at time $t$. Further, $s_t$ is specified as:
+
+\begin{equation}
+  \label{eq:decompose.s}
+  s_t = \alpha w_t + \eta_t,
+\end{equation} 
+where $w_t$ is information correlated price update and $\eta_t$ is a disturbance orthogonal to $w_t$. In this way, the model encompasses diverse specifications such as per \cite{roll1984simple} and \cite{glosten1987components}. For example, \cite{roll1984simple} can be considered a special case of the model when $\alpha=0$, implying the spread is solely determined by an information uncorrelated component. Also, \cite{glosten1987components} corresponds to $\eta_t=0$ when the only update to information set at time $t$ is the trade itself. 
+
+Empirically, we follow \cite{hasbrouck1993assessing} to estimate the multivariate version of the model, thus allowing general serial correlations within returns and other explanatory variables. First, we construct a multivariate time-series as follows:
+
+\begin{equation}
+  \label{eq:decompose.x}
+  X_t = [\Delta p_t \,\, x_t'],
+\end{equation} 
+where $p_t$ is a log price and $x_t$ includes four variables (volume, the sign of trade, signed volume, and the signed square-root of volume). The dataset includes 40\*27 stock-month observations for DMM treatment stocks and 120\*27 stock-month observations for non-DMM control stocks. Employing the constructed time-series, we estimate the VAR model of a lag 5 as:
+
+\begin{equation}
+  \label{eq:decompose.var}
+  X_t = \Phi_1 X_{t-1} + \Phi_2 X_{t-2} + \cdots + \Phi_5 X_{t-5} + \epsilon_t,
+\end{equation} 
+where $\Phi_k$ is a coefficient matrix and $\epsilon_t$ is a disturbance vector uncorrelated with $X_{t-k}$ terms. Since the constructed VAR model is covariance stationary, we obtain VMA($\infty$) model by inverting \autoref{eq:decompose.var} as follows:
+
+\begin{equation}
+  \label{eq:decompose.vma}
+  X_t = \epsilon_t + \Theta_1 \epsilon_{t-1} + \Theta_2 \epsilon_{t-2} + \Theta_3 \epsilon_{t-3} + \cdots = \Theta(L) \epsilon_t
+\end{equation} 
+where $\Theta_k$ is a coefficient matrix of the VMA model. The covariance matrix is estimated as $Var(\epsilon_t) = \Omega$ and the matrix $C_k$ is estimated as the following: 
+
+\begin{equation}
+  \label{eq:decompose.c}
+  C_k = \sum_{j=k+1}^{\infty} [\Theta_j]_1,
+\end{equation}
+where $[\cdot]_j$ means $j$-th row of a matrix. Empirically, we replace VMA coefficients $\Theta_k$s with zero when $k>100$, thus leading the estimation of $C_k$ as $C_k = \sum_{j=k+1}^{100} [\Theta_j]_1$. Finally, the standard deviation of the pricing error $\sigma_s$ is estimated as:
+
+\begin{equation}
+  \label{eq:decompose.estimate}
+  \sigma_s^2 = \sum_{k=0}^{\infty} C_k \Omega C_k'.
+\end{equation}
+
+In the estimation, we use intraday transaction data of 40 DMM stocks and 120 non-DMM matched stocks for the entire sample period including nine months before, during, and after the DMM implementation. Using the dataset, we estimate $\sigma_s$ and $\sigma_p$ for each stock daily. In this step, we limit the scope of analysis as stocks with more than 100 trades, as at least 100 data points are required in inverting VAR(5) to VMA(100). Then, estimated $\sigma_s$ and $\sigma_s/\sigma_p$ are aggregated into a monthly level. Summary statistics and the regression analysis are presented in the following section.
+
+
+## Summary statistics
+\label{sec:pe.summary}
+
+
+\begin{center} \textbf{Insert \autoref{tab:summary.pe} here} \end{center}
+
+
+\autoref{tab:summary.pe} summarizes the size of pricing error $\sigma_s$ and the size of pricing error normalized by the standard deviation of price $\sigma_s/\sigma_p$. The table presents several observations. First, the size of pricing error $\sigma_s$ decreases for both DMM and non-DMM stocks during the DMM implementation. Second, $\sigma_s$ decreases more for DMM stocks compared to non-DMM stocks during the implementation. Third, the component explained by pricing error in the entire price variation $\sigma_s/\sigma_p$ decreases for DMM stocks when a DMM is introduced, while increasing for non-DMM stocks. That is, the original level for both groups is similar at 26\% but $\sigma_s/\sigma_p$ decreases to 24\% for DMM stocks and increases to 27\% for non-DMM stocks during the implementation. After the DMM's termination, $\sigma_s/\sigma_p$ increases to approximately 29\% for both the groups. This implies that the size of pricing error decreases and the price movement tracks the implied efficient price more accurately during the implementation period.
+
+
+\begin{center} \textbf{Insert \autoref{fig:pe} here} \end{center}
+
+
+\autoref{fig:pe} reports a boxplot of pricing error variables including $\sigma_s$ and  $\sigma_s/\sigma_p$ for the entire 27-month sample period (July 2015--–September 2017). Each sample period includes nine months of subsamples before, during, and after the implementation of a DMM. According to \autoref{fig:pe}, the difference in the pricing error between treatment and control stocks increases in the \emph{during} period compared to the \emph{before} and \emph{after} periods. Also, the difference in pricing error is significantly higher for the raw pricing error variable $\sigma_s$ than for the normalized pricing error variable $\sigma_s/\sigma_p$. We conjecture the reason for this might be that the variation of the price $\sigma_p$ also diminishes when DMM participates in treatment stocks, thus offsetting the decrease of pricing error $\sigma_s$. But it is unclear why the normalized pricing error at the right panel increases more than the pricing error at the left panel when DMM contracts are terminated.
+
+## Difference-in-Difference Results
+\label{sec:pe.dd}
+
+In \autoref{tab:dd.pe}, we test whether the implementation of a DMM improves the price discovery process using the measure of $\sigma_s$ and $\sigma_s/\sigma_p$. The analysis of difference-in-difference tests are similar to those presented in \autoref{tab:dd.intro} and \autoref{tab:dd.leave}. Specifically, we estimate the following regression model:
+
+\begin{equation}
+  \label{eq:dd.pe}
+  y_{it} = \alpha_{i} + \beta_1  DMM_i*Post_t +\beta_2 DMM_i + \beta_3 Post_t + \beta_4 X_{it} + \gamma_t + \epsilon_{it},
+\end{equation} 
+where $y_{it}$ is $\sigma_s$ and $\sigma_s/\sigma_p$. We use 40\*27 stock-month observations for DMM stocks and 120\*27 stock-month observations for matched non-DMM stocks. 
+
+
+\begin{center} \textbf{Insert \autoref{tab:dd.pe} here} \end{center}
+
+
+\autoref{tab:dd.pe} shows that a DMM improves the price discovery process based on two natural experiments; (i) the introduction and (ii) the termination of a DMM. First, models (1) to (6) describe the difference in pricing error between treatment and control stocks at the introduction of a DMM. In models (1) to (3), the coefficient of interaction term is -0.02, which is significant at the 1\% level, and models (4) to (6) present the coefficients either marginally significant or insignificant at the 5\% level. The results suggest that the introduction of a DMM reduces pricing error, thus improving the price discovery process. Models (7) to (12) compare the difference in pricing error between treatment and control firms at the termination of a DMM. In models (7) to (9), the coefficient of interaction term is 0.01, which is significant at the 1\% level and models (10) to (12) show the coefficient 2.48 (or over), which is also significant at the 1\% level. The results indicate that after the termination of a DMM, the increase in the pricing error of treatment stocks is greater than that of control stocks. Overall, the \autoref{tab:dd.pe} suggests that the introduction of a DMM reduces pricing error (which is equivalent to enhancing the price discovery process) and the termination of a DMM increases pricing error (which is equivalent to a deteriorating price discovery process).
+
+
+# Conclusion
+
+The purpose of this study is to investigate whether a DMM improves market liquidity and the price discovery process. To test the hypotheses, this study employs the introduction and the termination of a DMM in the Korea stock market as a natural experiment. In the experiment, the exchange selects 40 stocks from 373 stocks and assigns DMMs to those 40 stocks. In the analysis, we use 40 DMM treatment stocks and 120 matched non-DMM control stocks. Adopting the difference-in-difference approach, we document several results as follows:
+
+1.	We find that the introduction of a DMM narrows down the effective spread and quoted spread, while the termination widens spreads. The variation of effective spread across periods seems to be the result of the realized spread variation (the gross profit of liquidity provider), and not a result of variation in informed trading. The evidence implies that a DMM reduces spreads and improves liquidity by reducing the profitability of liquidity providing. 
+
+2.	We find that the introduction of a DMM reduces pricing error, thus improving the price discovery process, while termination increases pricing error.
+
+Given the two main results, DMMs clearly play an important role in improving liquidity and price discovery.
+
+
+
+<!-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------TABLES---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------->
+
+
+\clearpage
+
+\linespread{1}
+
+\begin{figure}
+\begin{centering}
+\caption{Timeline of event study \label{fig:timeline}}
+\includegraphics[width=0.9\linewidth]{figs/timeline.png}
+\singlespace
+\footnotesize
+\autoref{fig:timeline} depicts the timeline of events across the entire sample period (July 2015–September 2017). The sample includes three periods, i.e., before the introduction, during the implementation, and after the termination of a DMM (before: July 2015–March 2016; during: April–December 2016; after: January–September 2017). 
+\end{centering}
+\end{figure}
+
+\clearpage
+
+
+```{r summary.all, tidy=TRUE, results='asis', echo=FALSE, cache=FALSE, message=FALSE, warning=FALSE, comment=FALSE}
+
+tmp =  kable(t1, digits=2, "latex", booktabs=T, caption = "Summary Statistics Panel Dataset") %>%
+  kable_styling(full_width=T, font_size = table_font) %>%
+  column_spec(1, width="4.5cm") %>%
+  pack_rows("Panel A: 40 DMM stocks",1,12, latex_gap_space = "1em", indent=F) %>%
+  pack_rows("Panel B: 332 non-DMM stocks", 13,24, latex_gap_space = "1em", indent=F) %>% 
+  capture.output()
+
+jk_kable(tmp, 
+jknote = "\\autoref{tab:summary.all} presents summary statistics for 40*27 stock-month observations for stocks randomly selected to introduce a designated market maker (DMM) (Panel A) and 332*27 stock-month observations for stocks not randomly selected (Panel B). Both groups constitute the same low liquidity cohort characterized by the Korean Exchange (KRX). Specifically, KRX introduced DMMs to 40 stocks that were randomly assigned from 373 stocks labeled as ``low liquid'' cohort. In the analysis, one firm is excluded from non-DMM stocks because of a merger. The entire sample covers 27 months (July 2015–September 2017) including 9 months before the introduction of a DMM (July 2015–March 2016), 9 months during the implementation of a DMM (March–December, 2016), and 9 months after the termination of a DMM (January–September, 2017). The dataset contains the monthly averages of volume-weighted effective spread, time-weighted quoted spread, volume-weighted realized spread, volume-weighted adverse selection, Amihud illiquidity measure, monthly standard deviation of returns, share volume, dollar volume, price, number of trades, monthly return, and market capitalization. All variables are winsorized at 1\\% and 99\\% quantile. The unit of each variable is presented in parentheses.")
+```
+
+
+\clearpage
+```{r summary.comparison, results='asis',echo=FALSE, message=FALSE, warning=FALSE, comment=FALSE}
+
+tmp = kable(t2, digits=2, "latex", booktabs=T, 
+            caption = "The Comparison Between Treatment and Control Groups") %>%
+  kable_styling(full_width=T, font_size = table_font) %>%
+  column_spec(1, width="5cm") %>%
+  capture.output()
+
+jk_kable(tmp, jknote = "\\autoref{tab:summary.comparison} summarizes the stock characteristics for treatment and control groups before the introduction of a designated market maker (DMM) (July 2015—March 2016). The table employs 40*9 stock-month observations for stocks selected to be introduced to a DMM and 332*9 stock-month observations for stocks that are not (non-DMM). The 9 month average of variables for each group (All, DMM, and non-DMM) are presented and the differences between DMM and non-DMM groups are reported. The dataset contains the monthly averages of volume-weighted effective spread, time-weighted quoted spread, volume-weighted realized spread, volume-weighted adverse selection, Amihud illiquidity measure, monthly standard deviation of returns, volume, dollar volume, price, number of trades, monthly return, and market capitalization. All variables are winsorized at 1\\% and 99\\% quantile. ***, **, * indicate the statistical significance level at the 0.1\\%, 1\\%, and 5\\% levels, respectively. The unit of each variable is presented in parentheses.")
+
+  
+```
+
+\clearpage
+```{r summary.matched, results='asis',echo=FALSE, message=FALSE, warning=FALSE, comment=FALSE}
+
+tmp = kable(psm.summary, digits=2, "latex", booktabs=T, 
+            caption = "Summary of All Samples and Matched Samples") %>%
+  kable_styling(full_width = T, font_size = table_font) %>%
+  column_spec(1, width="5cm") %>%
+  pack_rows("Panel A: All samples", 1,7, latex_gap_space = "1em", indent=F) %>%
+  pack_rows("Panel B: One-to-Three Matched samples", 8,14, latex_gap_space = "1em", indent=F) %>%
+  capture.output()
+
+jk_kable(tmp, 
+jknote = "\\autoref{tab:summary.matched} summarizes the average of stock characteristics for all samples (Panel A) and matched samples (Panel B). Matching algorithms based on propensity scores were induced by logit model with the explanatory variables of effective spread, quoted spread, volume, price, and market capitalization. For each treatment DMM stock, the algorithm matches three non-DMM stocks (One-to-Three matching). The table also presents differences in stock characteristics between DMM and non-DMM groups. The significance level is calculated by two sample t-test. ***, **, * indicate the statistical significance level at the 0.1\\%, 1\\%, and 5\\% levels, respectively. The unit of each variable is presented in parentheses.")
+
+```
+
+\clearpage
+
+\begin{figure}
+\begin{centering}
+\caption{Box Plot of Liquidity Variables for Matched Samples.\label{fig:liquidity}}
+\includegraphics[width=0.9\linewidth]{figs/fig1.png}
+\singlespace
+\footnotesize
+\autoref{fig:liquidity} presents a boxplot of monthly liquidity variables across the entire sample period (July 2015—September 2017). Each period includes 9 months before, during, and after the introduction of a designated market maker (before: July 2015—March 2016; during: April–December 2016; after: January–September 2017). For each period, the figure presents boxplots of monthly liquidity variables across stocks including share volume(\emph{volume}), dollar volume(\emph{dvolume}), effective spread(\emph{espread}), quoted spread(\emph{qspread}), realized spread(\emph{qspread}), and adverse selection(\emph{advselect}). The unit of each variable is presented in parentheses.
+\end{centering}
+\end{figure}
+
+\clearpage
+\begin{landscape}
+```{r dd.intro, results='asis',echo=FALSE, message=FALSE, warning=FALSE, comment=FALSE}
+jk_stargazer(intro.espread1, intro.espread2, intro.espread3, intro.qspread1, intro.qspread2, intro.qspread3, intro.rspread1, intro.rspread2, intro.rspread3, intro.adv1, intro.adv2, intro.adv3,
+             intro.amihud1, intro.amihud2, intro.amihud3,
+             jkfontsize=8, no.space=T, digits=2, align=T, 
+             title="DMM Introduction and the Post-Event Change in Liquidity Variables", label ="tab:dd.intro",
+             covariate.labels=c("DMM*Post", "DMM", "Post", "Price (KRW 1M)", "Volume (1M shares)", "Volatility (\\%)"), 
+             omit = c("stock2", "dg"), 
+             omit.stat=c("f", "ser"),
+             dep.var.caption = "", dep.var.labels="",
+             column.labels = c("espread(\\%)", "qspread(\\%)", "rspread(\\%)", "advselect(\\%)", "ILLIQ(\\%/M)"),
+             column.separate = c(3,3,3,3,3),
+             column.sep.width="-20pt",
+             add.lines=list(c("Time Dummy", rep(c("No", "No", "Yes"), 5)), 
+                            c("Fixed Effect", rep(c("No", "No", "Yes"), 5)), 
+                            c("\\#Observations", rep(c(int.espread.nobs,int.qspread.nobs,int.rspread.nobs,int.adv.nobs, int.amihud.nobs), each=3))),
+             jknote = "
+             
+             \\autoref{tab:dd.intro} summarizes the results from the difference-in-difference tests of liquidity variables related to the introduction of a designated market maker (DMM) including 9 months before the introduction (before: July 2015—March 2016) and 9 months during the implementation of a DMM (during: April–December 2016). In the analysis, we consider monthly liquidity variables of 40 treatment firms with 120 control matched firms selected by One-to-Three propensity score matching comparing spread, volume, price, and market capitalization in the \\emph{before} period. The table reports the estimate of the following model: $y_{it} = \\alpha_{i} + \\beta_1 DMM_i*Post_t + \\beta_2 DMM_i + \\beta_3 Post_t + \\beta_4 X_{it} + \\gamma_t + \\epsilon_{it}$, where $i$ indicates firms, $t$ indicates months, $\\alpha_i$ is a fixed effect, $Post_t$ is a time dummy which indicates the post-event period, $DMM_i$ is a dummy for the treatment group, $X_{it}$ indicates control variables including the price, volume, and volatility, $\\gamma_t$ is a dummy for each month, and $\\epsilon_{it}$ is a residual term. Dependent liquidity variables $y_{it}$ include effective spread(\\emph{espread}), quoted spread(\\emph{qspread}), realized spread(\\emph{qspread}), adverse selection(\\emph{advselect}), and Amihud illiquidity measure (\\emph{ILLIQ}). The standard errors are adjusted for both firm and time clustering and presented in parentheses. ***, **, * indicate the statistical significance level at the 0.1\\%, 1\\%, and 5\\% levels, respectively.
+"
+             )
+```
+\end{landscape}
+
+
+\clearpage
+\begin{landscape}
+```{r dd.leave, results='asis',echo=FALSE, message=FALSE, warning=FALSE, comment=FALSE}
+jk_stargazer(leave.espread1, leave.espread2, leave.espread3, leave.qspread1, leave.qspread2, leave.qspread3, leave.rspread1, leave.rspread2, leave.rspread3, leave.adv1, leave.adv2, leave.adv3,
+             leave.amihud1, leave.amihud2, leave.amihud3,
+             jkfontsize=8, no.space=T, digits=2, align=T, 
+             title="DMM Termination and the Post-Event Change in Liquidity Variables", label="tab:dd.leave",
+             covariate.labels=c("DMM*Post", "DMM", "Post", "Price (KRW 1M)", "Volume (1M shares)", "Volatility (\\%)"), 
+             omit = c("stock2", "dg"), 
+             omit.stat=c("f", "ser"),
+             dep.var.caption = "", dep.var.labels="",
+             column.labels = c("espread(\\%)", "qspread(\\%)", "rspread(\\%)", "advselect(\\%)", "ILLIQ(\\%/M)"),
+             column.separate = c(3,3,3,3,3),
+             column.sep.width="-20pt",
+             add.lines=list(c("Time Dummy", rep(c("No", "No", "Yes"), 5)), 
+                            c("Fixed Effect", rep(c("No", "No", "Yes"), 5)), 
+                            c("\\#Observations", rep(c(lea.espread.nobs,lea.qspread.nobs,lea.rspread.nobs,lea.adv.nobs, lea.amihud.nobs), each=3))),
+             jknote = "
+    \\autoref{tab:dd.leave} summarizes the results from the difference-in-difference tests of liquidity variables related to the termination of a designated market maker (DMM) contract including 9 months during the implementation of a DMM (during: April–December 2016) and 9 months after the termination of a DMM contract (after: January–September 2017). In the analysis, we consider monthly liquidity variables of 40 treatment firms with 120 control matched firms selected by One-to-Three propensity score matching comparing spread, volume, price, and market capitalization in the before period (July 2015—March 2016). The table reports the estimate of the following model: $y_{it} = \\alpha_{i} + \\beta_1 DMM_i*Post_t +\\beta_2 DMM_i + \\beta_3 Post_t + \\beta_4 X_{it} + \\gamma_t + \\epsilon_{it}$, where $i$ indicates firms, $t$ indicates months, $\\alpha_i$ is a fixed effect, $Post_t$ is a time dummy which indicates the post-event period, $DMM_i$ is a dummy for the treatment group, $X_{it}$ indicates control variables including the price, volume, and volatility, $\\gamma_t$ is a dummy for each month, and $\\epsilon_{it}$ is a residual term. Dependent liquidity variables $y_{it}$ include effective spread(\\emph{espread}), quoted spread(\\emph{qspread}), realized spread(\\emph{qspread}), adverse selection(\\emph{advselect}), and Amihud illiquidity measure (\\emph{ILLIQ}). The standard errors are adjusted for both firm and time clustering and presented in parentheses. ***, **, * indicate the statistical significance level at the 0.1\\%, 1\\%, and 5\\% levels, respectively.
+   "
+             )
+```
+\end{landscape}
+
+\clearpage
+```{r summary.pe, tidy=TRUE, results='asis', echo=FALSE, cache=FALSE, message=FALSE, warning=FALSE, comment=FALSE}
+
+tmp =  kable(t.pe, digits=2, "latex", booktabs=T, caption = "Summary Statistics Price Discovery", escape = F) %>%
+  kable_styling(full_width=T, font_size = table_font) %>%
+  column_spec(1, width="5cm") %>%
+  collapse_rows(1:2) %>%
+  pack_rows("Panel A: 40 DMM stocks",1,6, latex_gap_space = "1em", indent=F) %>%
+  pack_rows("Panel B: 120 non-DMM matched stocks", 7,12, latex_gap_space = "1em", indent=F) %>% 
+  capture.output()
+
+jk_kable(tmp, 
+jknote = "\\autoref{tab:summary.pe} presents the summary statistics of the measure of pricing error for 40*27 stock-month observations for designated market maker (DMM) stocks (Panel A) and 120*27 stock-month observations for the matched sample (Panel B). The estimation of pricing error follows the random walk decomposition of \\cite{hasbrouck1993assessing}. Specifically, we use the following model: $p_{i,t} = m_{i,t} + s_{i,t},\\, m_{i,t}=m_{i,t-1}+w_{i,t}$, and $s_{i,t}$ is a zero-mean stationary process. In the estimation, we construct a stationary multivariate timeseries: $X_t = [\\Delta p_t \\,\\, x_t']$, where $p_t$ is a log price and $x_t$ includes four variables (volume, sign of the trade, signed volume, and the signed square-root of volume). Empirically, we choose VAR(5) model to reach VMA($\\infty$) representation $X_t = \\Theta (L) \\epsilon_t$ with the covariance matrix $Var(\\epsilon_t) = \\Omega$ (Empirically, we replace VMA coefficients $\\Theta_k$s to zero if $k>100$). According to \\cite{hasbrouck1993assessing}, we estimate the pricing error variance as $\\sigma_s^2 = \\sum_{k=0}^{\\infty} C_k \\Omega C_k '$, where $C_k = \\sum_{j=k+1}^{\\infty}[\\Theta_j]_1$, and $[\\cdot]_j$ denotes the $j$-th row of a matrix. The table summarizes $\\sigma_s$ and $\\sigma_s/\\sigma_p$, where $\\sigma_p$ is the standard deviation of a price.
+")
+
+```
+
+\clearpage
+\begin{figure}
+\begin{centering}
+\caption{Box Plot of Pricing Error Variables for Matched Samples \label{fig:pe}}
+\includegraphics[width=0.9\linewidth]{figs/fig2.png}
+\singlespace
+\footnotesize
+\autoref{fig:pe} presents the boxplot of monthly pricing error variables across the entire sample period (July 2015—September 2017). Each period includes 9 months before, during, and after the introduction of a designated market maker (before: July 2015—March 2016; during: April–December 2016; after: January–September 2017). For each period, the figure presents boxplots of  monthly pricing error variables across stocks including $\sigma_s$ and $\sigma_s/\sigma_p$. The estimation of pricing error follows the random walk decomposition of \cite{hasbrouck1993assessing}. Specifically, we use the following model: $p_{i,t} = m_{i,t} + s_{i,t},\, m_{i,t}=m_{i,t-1}+w_{i,t}$, and $s_{i,t}$ is a zero-mean stationary process. In the estimation, we construct a stationary multivariate timeseries: $X_t = [\Delta p_t \,\, x_t']$, where $p_t$ is a log price and $x_t$ includes four variables (volume, sign of the trade, signed volume, and the signed square-root of volume). Empirically, we choose VAR(5) model to reach VMA($\infty$) representation $X_t = \Theta (L) \epsilon_t$ with the covariance matrix $Var(\epsilon_t) = \Omega$ (Empirically, we replace VMA coefficients $\Theta_k$s to zero if $k>100$). According to \cite{hasbrouck1993assessing}, we estimate the pricing error variance as $\sigma_s^2 = \sum_{k=0}^{\infty} C_k \Omega C_k '$, where $C_k = \sum_{j=k+1}^{\infty}[\Theta_j]_1$, and $[\cdot]_j$ denotes the $j$-th row of a matrix. The table summarizes $\sigma_s$ and $\sigma_s/\sigma_p$, where $\sigma_p$ is the standard deviation of a price. The unit of each variable is presented in the parentheses.
+\end{centering}
+\end{figure}
+
+
+\clearpage
+\begin{landscape}
+```{r dd.pe, results='asis',echo=FALSE, message=FALSE, warning=FALSE, comment=FALSE}
+jk_stargazer(pe.s1,pe.s2,pe.s3, pe.pe1,pe.pe2,pe.pe3, pe.s4, pe.s5, pe.s6, pe.pe4,pe.pe5,pe.pe6,
+             jkfontsize=8, no.space=T, digits=2, align=T, 
+             title="Post-Event Change in Price Discovery", label="tab:dd.pe",
+             covariate.labels=c("DMM*Post", "DMM", "Post", "Price (KRW 1M)", "Volume (1M shares)"), 
+             omit = c("stock2", "dg"), 
+             omit.stat=c("f", "ser"),
+             dep.var.caption = "", dep.var.labels="",
+             column.labels = c("$\\sigma_s$(Intro)", "$\\sigma_s/\\sigma_p$(Intro)", 
+                               "$\\sigma_s$(Leave)", "$\\sigma_s/\\sigma_p$(Leave)"),
+             column.separate = c(3,3,3,3),
+             column.sep.width="-10pt",
+             add.lines=list(c("Time Dummy", rep(c("No", "No", "Yes"), 4)), 
+                            c("Fixed Effect", rep(c("No", "No", "Yes"), 4)), 
+                            c("\\#Observations", obs.s1, obs.s2, obs.s3, obs.pe1, obs.pe2, obs.pe3, obs.s4, obs.s5, obs.s6, obs.pe4, obs.pe5, obs.pe6)),
+             jknote = "
+    \\autoref{tab:dd.pe} summarizes the results from the difference-in-difference tests of pricing error variables around the introduction and the termination of designated market maker (DMM) implementation (before: July 2015—March 2016; during: April–December 2016; after: January–September 2017), where the ``intro'' compares the \\emph{before} and \\emph{during} periods and ``leave'' compares the \\emph{during} and \\emph{after} periods. In the analysis, the sample of 40 treatment firms with 120 control matched firms are considered. The matched firms are selected by a One-to-Three propensity score matching comparing spread, volume, price, and market capitalization in the \\emph{before} period. The table reports the estimate of the following model: $y_{it} = \\alpha_{i} + \\beta_1  DMM_i*Post_t +\\beta_2 DMM_i + \\beta_3 Post_t + \\beta_4 X_{it} + \\gamma_t + \\epsilon_{it}$, where $i$ indicates firms, $t$ indicates months, $\\alpha_i$ is a fixed effect, $post_t$ is a time dummy which indicates the post-event period, $DMM_i$ is a dummy for the treatment group, $X_{it}$ indicates control variables including the price and volume, $\\gamma_t$ is a dummy for each month, and $\\epsilon_{it}$ is a residual term. 
+    The estimation of pricing error follows the random-walk decomposition of \\cite{hasbrouck1993assessing}. Specifically, we use the following model: $p_{i,t} = m_{i,t} + s_{i,t},\\, m_{i,t}=m_{i,t-1}+w_{i,t}$, and $s_{i,t}$ is a zero-mean stationary process. In the estimation, we construct a stationary multivariate timeseries: $X_t = [\\Delta p_t \\,\\, x_t']$, where $p_t$ is a log price and $x_t$ includes four variables (volume, sign of the trade, signed volume, and the signed square-root of volume). Empirically, we choose VAR(5) model to reach VMA($\\infty$) representation $X_t = \\Theta (L) \\epsilon_t$ with the covariance matrix $Var(\\epsilon_t) = \\Omega$ (Empirically, we replace VMA coefficients $\\Theta_k$s to zero if $k>100$). According to \\cite{hasbrouck1993assessing}, we estimate the pricing error variance as $\\sigma_s^2 = \\sum_{k=0}^{\\infty} C_k \\Omega C_k '$, where $C_k = \\sum_{j=k+1}^{\\infty}[\\Theta_j]_1$, and $[\\cdot]_j$ denotes the $j$-th row of a matrix. The standard errors are adjusted for both firm and time clustering and presented in parentheses. ***, **, * indicate the statistical significance level at the 0.1\\%, 1\\%, and 5\\% levels, respectively.
+"
+             )
+```
+\end{landscape}
+
+<!-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------APPENDIX---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------->
+
+
+\clearpage
+# Appendix {-}
+## Appendix A. The Classification of Low Liquid Stocks {-}
+\label{sec:app.classification}
+
+```{r liqcriteria, tidy=TRUE, results='asis', echo=FALSE, cache=FALSE, message=FALSE, warning=FALSE, comment=FALSE}
+
+liq.criteria = data.frame(
+  col1 = c("","High liquidity", "Middle liquidity", "Middle liquidity", "Low liquidity", "Extremely Low liquidity"),
+  col2 = c("Trading Volume", "Good", "Good", "Bad", "Bad", "Bad"),
+  col3 = c("Effective Spread", "Good", "Bad", "Good", "Bad", "Bad"),
+  col4 = c("Trading Frequency", "---", "---", "---", "Good", "Bad"),
+  stringsAsFactors = F
+)
+colnames(liq.criteria) = liq.criteria[1,]
+liq.criteria = liq.criteria[-1,]
+rownames(liq.criteria) = NULL
+
+tmp =  kable(liq.criteria, "latex", booktabs=T, caption = "Criteria Low Liquid Stocks", escape = F, align=c("l",rep("c",3))) %>%
+  kable_styling(font_size = table_font, full_width=T, latex_options = "HOLD_position") %>%
+  collapse_rows(1) %>%
+  row_spec(4, bold = T) %>%
+  capture.output()
+
+jk_kable(tmp,  jknote = "")
+
+```
+
+The Korean Exchange (KRX) evaluates the liquidity of stocks by trading volume and effective spread (primary indicators), and trading frequency (auxiliary indicator).Basically, three indicators are categorized as \`Good' or \`Bad' according to prespecified level. Trading volume is marked as \`Good' if average daily trading volume exceeds 50,000 shares, and \`Bad' otherwise. Effective spread is marked as \`Good' if the spread is narrower than 3 ticks, and \`Bad' otherwise. For trading frequency, time duration for subsequent trading occurred should be less than 10 minutes for \`Good' grade. According to the three criteria, every stock listed on the KRX are grouped into four categories: high liquidity (Tier-1), middle liquidity (Tier-2), low liquidity (Tier-3), and extremely low liquidity (Tier-4). If both trading volume and effective spread are marked as \`Good', stocks are categorized as high liquidity. If one of the primary indicators (i.e., trading volume and effective spread) cannot meet the criteria, stocks are categorized as middle liquidity. If both primary indicators fail to meet the criteria while trading frequency is \`Good', stocks are categorized as low liquidity (Tier-3), the target group of the current paper. Stocks whose trading volume, effective spread, and trading frequency all fail to meet criteria are grouped into extremely low liquid stocks.
+
+```{r liqcriteria2, tidy=TRUE, results='asis', echo=FALSE, cache=FALSE, message=FALSE, warning=FALSE, comment=FALSE}
+
+liq.criteria2 = data.frame(
+  Indicator = c("Trading Volume", "Effective Spread", "Trading Frequency"),
+  Bad = c("Below 50k shares or\nbelow 50\\% percentile",
+          "Exceeds 3 ticks or\nbelow 50\\% percentile", 
+          "Exceeds 600 seconds"),
+  Good = c("Exceeds 50k shares and\nabove 50\\% percentile",
+           "Below 3 ticks and\nabove 50\\% percentile",
+           "Below 600 seconds")
+)
+
+tmp =  kable(liq.criteria2, "latex", booktabs=T, caption = "Criteria Indicators", escape = F) %>%
+  kable_styling(font_size = table_font, full_width=T, latex_options = "HOLD_position") %>%
+  row_spec(0, align="c") %>%
+  column_spec(1, width = "2.7cm") %>%
+  capture.output()
+
+jk_kable(tmp,  jknote = "")
+
+```
+
+Among low liquid stocks, all of the following conditions should be satisfied in order to be considered potential stocks for DMM introduction; 1) a common stock; 2) not a special purpose company (SPC); 3) not an issue for administration (which is a list of stocks for potential delisting); 4) not a liquidity provider (LP) designated stock; 5) do not experience special corporate events (such as stock split, stock dividend, and bonus issue) during the liquidity evaluation period. Stocks that are categorized as low liquidity while meeting all above conditions are the subjects for DMM introduction.
+
+## Appendix B. The Recruitment of DMMs {-}
+\label{sec:app.recruitment}
+
+### The Announcement {-}
+
+After the evaluation of liquidity using the sample ranging from October in year $t-1$ to September in year $t$, KRX announces the stocks characterized as a low-liquid (Tier-3) on a day in October in year $t$. When the full stock list is disclosed during the announcement, eligible KRX members can apply for the position of a DMM. In the current stage of application, members cannot select specific stocks for market making. They are able to view the entire list of stocks and decide whether to apply or not. After the application process, KRX constructs multiple stock baskets for KOSPI and KOSDAQ separately, following an official announcement of the baskets. Members that applied then select two stock baskets, one within KOSPI baskets and the other within KOSDAQ baskets. In the following subsections, the process of evaluating `eligible' members are outlined, as well as the method of constructing stock baskets and matching those baskets to members that applied.
+
+### The Evaluation of Eligible Members {-}
+
+Several criteria are used for the evaluation of applicants: (1) the capability of risk taking (the size of proprietary trading, net capital ratio, etc.) and (2) the capability of market making (previous year's performance as a DMM in stock market, previous performance as a DMM in a derivative market, and performance as a liquidity provider). However, in order to guarantee a fair opportunity for all members, all first year DMM applicants qualify. Therefore, all applicants are considered proper market makers in the current study, as this is the first year of DMM implementation.
+
+### Stock Baskets Construction {-}
+
+After determining the suitable number of DMMs, KRX constructs a set of baskets which constitute multiple stocks. Specifically, KRX calculates the number of stocks in a basket by dividing the number of target stocks by the number of applied members for market maker position. For example, if the number of target stocks is 50 and the number of DMM candidates is 10, KRX constructs 10 baskets of 5 stocks each. Further, in order to equalize the burden of market makers, KRX distributes stocks according to scores induced by the evaluation of liquidity (trading volume, spread) and the potential for hedging (the short sale volume, whether the related derivatives are listed in the market). For instance, the top 10 stocks are assigned from basket 1 to 10 sequentially in order of high score, then from basket 11 to 20 stocks are assigned in the reverse order, then again from basket 21 to 30 they are assigned sequentially from basket 1 to basket 10. In this way, KRX repeats the procedure until all stocks are assigned.
+
+### Matching DMMs to Stock Baskets {-}
+
+In principle, based on the rank of the evaluation of eligibility, the highest ranked member receives the priority to select stock baskets. However, KRX adopts a lottery system for the first year of implementation to select the member who receives the priority for picking baskets. Note that each member should choose two baskets in a bundle, one from KOSPI and the other from KOSDAQ.
+
+## Appendix C. Requirements of a DMM {-}
+\label{sec:app.obligation}
+
+### Time {-}
+The obligation to maintain quotes is granted at all times during regular trading hours (9 a.m.---15:20 p.m.) regardless of the level of the market’s bid-ask spread, except for the exemption time as described below. Market makers are exempted from obligations in cases where there is a small need for market making or if market making is difficult during the requirement period. For example, requirements are exempted in the following cases: 1) a bid quote remains at the upper limit price or a selling price remains at the lower limit price; 2) the daily trading volume of a market maker exceeds 50% of the average daily trading volume; 3) the stock is designated as an investment alert item; and 4) it is difficult to submit a quote due to system failure.
+
+### Submission of Simultaneous Quotes {-}
+
+In principle, the market maker should quote at the bid and ask side simultaneously. However, if the position held by the market maker is excessive in one direction or it is impossible to maintain the quote in one direction, the requirement to maintain simultaneous quotes is exempted. Specifically, market makers are exempted from the obligation when the net position of the market maker account exceeds 0.2% of the number of listed shares. Further, if the net purchase position of a market maker account falls short of the minimum quote quantity, it is not possible to quote and therefore it is exempt from the requirement.
+
+### Mandatory Spread {-}
+
+During the evaluation period, each stock is grouped into four categories based on liquidity. According to liquidity categories, different mandatory spread criteria are required to maintain based on tick.
+
+```{r mandatoryspread, tidy=TRUE, results='asis', echo=FALSE, cache=FALSE, message=FALSE, warning=FALSE, comment=FALSE}
+
+mandatory.spread = data.frame(
+  Class = c("Effective spread\nin evaluation period", "Mandatory spread"),
+  Class1 = c("Below 6 Tick", "4 Tick"),
+  Class2 = c("6---8 Tick", "5 Tick"),
+  Class3 = c("8---10 Tick", "7 Tick"),
+  Class4 = c("Above 10 Tick", "8 Tick")
+)
+
+tmp =  kable(mandatory.spread, "latex", booktabs=T, caption = "Mandatory Spread Requirements", escape = F, align=c("l", rep("c",4))) %>%
+  kable_styling(font_size = table_font, full_width=T, latex_options = "HOLD_position") %>%
+  column_spec(1, width="5.5cm") %>%
+  row_spec(2, bold=T) %>%
+  capture.output()
+
+jk_kable(tmp,  jknote = "")
+
+```
+
+### Size of Quotes {-}
+
+To secure the effectiveness of the market maker's quotes, the criteria shall be determined by reflecting the average quote size within a certain monetary range (minimum KRW 1 million up to KRW 10 million).
+
+```{r sizeofquote, tidy=TRUE, results='asis', echo=FALSE, cache=FALSE, message=FALSE, warning=FALSE, comment=FALSE}
+
+size.quote = data.frame(
+col1 = c("Average Quote Size","Middle-liquidity", "Low-liquidity"),
+col2 = c("Below\nKRW 1M", "KRW 2M", "KRW 1M"),
+col3 = c("KRW 1M---2M", "KRW 4M", "KRW 2M"),
+col4 = c("KRW 2M---3M", "KRW 6M", "KRW 3M"),
+col5 = c("KRW 3M---4M", "KRW 8 M", "KRW 4M"),
+col6 = c("Above\nKRW 4M", "KRW 10M", "KRW 5M"),
+stringsAsFactors = F
+)
+colnames(size.quote) = size.quote[1,]
+size.quote = size.quote[-1,]
+rownames(size.quote) = NULL
+
+tmp =  size.quote %>%
+  mutate_all(linebreak) %>%
+  kable("latex", booktabs=T, caption = "Size of Quotes", escape = F, align=c("l", rep("c",5))) %>%
+  kable_styling(font_size = table_font, full_width=T, latex_options = "HOLD_position") %>%
+  column_spec(1, width="3cm") %>%
+  capture.output()
+
+jk_kable(tmp,  jknote = "")
+
+```
+
+### Maker Quotes {-}
+
+Market making quotes are allowed only in the form of maker quotes to maximize the functions of market-making, but market makers have a right to submit taker quotes which are recognized as a general quote, not a market maker’s quote.
+
+### Intraday Quotes Maintaining {-}
+
+Market makers are obliged to maintain quotes that meet the requirement in excess of 60% of the regular operating hours (excluding exemption time). Daily market-making shall meet the maintenance requirements of more than 70% of the total contract days.
+
+## Appendix D. Benefits of a DMM {-}
+\label{sec:app.benefit}
+
+There are several benefits for market makers. First, the market maker's quotes are exempt from transaction tax and the exchange commission. Second, the exchange refunds commission income and, if necessary, the market maker receives a fixed amount for compensation (which is stated in the market maker's contract) according to the quarterly evaluation results. Further, the evaluation results are reflected in the recruitment of market makers for the following year. Last, additional points are awarded to market makers in the stock market when they apply for the market maker position in derivative markets.
+
+## Appendix E. The List of Firms {-}
+\label{sec:app.list}
+
+\linespread{1}
+```{r firmlist, tidy=TRUE, results='asis', echo=FALSE, cache=FALSE, message=FALSE, warning=FALSE, comment=FALSE}
+firmname = read.csv("../01_data/firm_list_encode.csv", stringsAsFactors = F, 
+                    colClasses = c("NULL", "integer", "integer", "NULL", "character", "NULL")) %>%
+  arrange(desc(mm), Ksq, Eng_short)
+
+dmm = firmname %>% filter(mm==1)
+dmm.ksp = cbind(dmm$Eng_short[1:9], dmm$Eng_short[10:18], 
+                c(dmm$Eng_short[19:25], rep("",2)))
+dmm.ksq = cbind(dmm$Eng_short[26:30], dmm$Eng_short[31:35], dmm$Eng_short[36:40])
+
+nomm = firmname %>% filter(mm==0)
+nomm.ksp = cbind(nomm$Eng_short[1:34], nomm$Eng_short[35:68], nomm$Eng_short[69:102])
+nomm.ksq = cbind(
+  nomm$Eng_short[103:179], nomm$Eng_short[180:256], nomm$Eng_short[257:333]
+)
+
+firmname.out = rbind(dmm.ksp, dmm.ksq, nomm.ksp, nomm.ksq)
+
+kable(firmname.out, longtable = T, "latex", booktabs=T, caption = "The list of 373 low liquid firms") %>%
+  kable_styling(full_width=T, font_size = table_font) %>%
+  pack_rows("Panel A-1. DMM (KOSPI), N=25 ",1,9, latex_gap_space = "1em", indent=F) %>%
+  pack_rows("Panel A-2. DMM (KOSDAQ), N=15 ", 10,14, latex_gap_space = "1em", indent=F) %>% 
+  pack_rows("Panel B-1. Non DMM (KOSPI), N=102", 15,48, latex_gap_space = "1em", indent=F) %>% 
+  pack_rows("Panel B-2. Non DMM (KOSDAQ), N=231", 49, 125, latex_gap_space = "1em", indent=F) 
+
+```
+
+
+\clearpage
+# References
+
+
+

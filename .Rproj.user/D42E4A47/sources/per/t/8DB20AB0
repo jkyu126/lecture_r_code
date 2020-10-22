@@ -1,0 +1,25 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1603352534321.000,
+    "dirty" : false,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "2536093211",
+    "id" : "8DB20AB0",
+    "lastKnownWriteTime" : 1603355122,
+    "last_content_update" : 1603355122846,
+    "path" : "~/Documents/GitHub/lecture/r_code/index.Rmd",
+    "project_path" : "index.Rmd",
+    "properties" : {
+        "cursorPosition" : "82,0",
+        "scrollLine" : "66"
+    },
+    "read_only" : false,
+    "read_only_alternatives" : [
+    ],
+    "relative_order" : 4,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_markdown"
+}
