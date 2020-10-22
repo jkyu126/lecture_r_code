@@ -1560,8 +1560,9 @@ div.tocify {
 <div id="코드" class="section level1">
 <h1><span class="header-section-number">2</span> 코드</h1>
 <ul>
-<li>Github의 제 코드 페이지 (<a href="https://github.com/jkyu126/lecture/tree/master/r_code" class="uri">https://github.com/jkyu126/lecture/tree/master/r_code</a>) 를 들어갑니다.</li>
-<li>01_data_cleaning.R을 보시면 됩니다. 아래 코드와 동일합니다.</li>
+<li>Github의 제 코드 페이지 (<a href="https://github.com/jkyu126/lecture_r_code" class="uri">https://github.com/jkyu126/lecture_r_code</a>) 를 들어갑니다.</li>
+<li>우측 상단 Code 다운로드 버튼을 클릭합니다.</li>
+<li>01_data_cleaning.R을 R로 열고 따라하시면 됩니다.</li>
 </ul>
 <pre class="r"><code>rm(list=ls())
 library(tidyverse)
@@ -1571,7 +1572,7 @@ library(tidyverse)
 
 ## 1. Import shareoutstanding data (Dataguide)
 
-shrout = read.csv(&quot;01_data/list/dataguide_shrout.csv&quot;, stringsAsFactors = F) %&gt;%
+shrout = read.csv(&quot;./01_data/list/dataguide_shrout.csv&quot;, stringsAsFactors = F) %&gt;%
   select(-Symbol) %&gt;%
   tidyr::gather(Varname, Var, starts_with(&quot;A&quot;)) %&gt;%
   mutate(stock2 = substr(Varname, 2,7), shrout = sapply(Var, function(x) gsub(&quot;,&quot;, &quot;&quot;, x) %&gt;% as.numeric())) %&gt;%

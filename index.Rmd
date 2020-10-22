@@ -69,8 +69,9 @@ library(quantmod)
 
 # 코드 
 
-- Github의 제 코드 페이지 (https://github.com/jkyu126/lecture/tree/master/r_code) 를 들어갑니다.
-- 01_data_cleaning.R을 보시면 됩니다. 아래 코드와 동일합니다.
+- Github의 제 코드 페이지 (https://github.com/jkyu126/lecture_r_code) 를 들어갑니다. 
+- 우측 상단 Code 다운로드 버튼을 클릭합니다.
+- 01_data_cleaning.R을 R로 열고 따라하시면 됩니다.
 
 
 ```{r eval=F, tidy=T}
@@ -83,7 +84,7 @@ library(tidyverse)
 
 ## 1. Import shareoutstanding data (Dataguide)
 
-shrout = read.csv("01_data/list/dataguide_shrout.csv", stringsAsFactors = F) %>%
+shrout = read.csv("./01_data/list/dataguide_shrout.csv", stringsAsFactors = F) %>%
   select(-Symbol) %>%
   tidyr::gather(Varname, Var, starts_with("A")) %>%
   mutate(stock2 = substr(Varname, 2,7), shrout = sapply(Var, function(x) gsub(",", "", x) %>% as.numeric())) %>%
