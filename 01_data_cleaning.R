@@ -9,8 +9,10 @@ library(tidyverse)
 
 shrout = read.csv("01_data/list/dataguide_shrout.csv", stringsAsFactors = F) %>%
   select(-Symbol) %>%
-  tidyr::gather(Varname, Var, starts_with("A")) %>%
-  mutate(stock2 = substr(Varname, 2,7), shrout = sapply(Var, function(x) gsub(",", "", x) %>% as.numeric())) %>%
+  pivot_longer(!date_id, names_to = "Varname", values_to = "Var") %>%
+  mutate(stock2 = substr(Varname, 2,7), 
+         shrout = sapply(Var, function(x) gsub(",", "", x) %>% 
+                           as.numeric())) %>%
   select(date_id, stock2, shrout) %>%
   arrange(stock2, date_id) %>% 
   drop_na() %>%
@@ -18,20 +20,20 @@ shrout = read.csv("01_data/list/dataguide_shrout.csv", stringsAsFactors = F) %>%
 
 ## 2. Import price data (Dataguide)
 
-price = read.csv("./01_data/list/dataguide_price.csv", stringsAsFactors = F)
-for (i in 3:ncol(price)){
-  price[,i] = sapply(price[,i], function(x) gsub(",", "", x))
-  price[,i] = as.numeric(price[,i])
-}
-price2 = price %>% 
-  tidyr::gather(stock, price, starts_with("A")) %>%
-  mutate(stock2 = substr(stock, 2,7)) %>%
-  select(-Symbol, -stock) %>%
-  drop_na(price)
+price2 = read.csv("01_data/list/dataguide_price.csv", stringsAsFactors = F) %>%
+  select(-Symbol) %>%
+  pivot_longer(!date_id, names_to = "Varname", values_to = "Var") %>%
+  mutate(stock2 = substr(Varname, 2,7), 
+         price = sapply(Var, function(x) gsub(",", "", x) %>% 
+                           as.numeric())) %>%
+  select(date_id, stock2, price) %>%
+  arrange(stock2, date_id) %>% 
+  drop_na() %>%
+  as.data.frame()
 
 ## 3. Import SAS calculated files
 sas = read.csv("./01_data/summary.csv", stringsAsFactors = F) %>%
-  mutate(stock2 = substr(ISU_CD,4,9), tradeday=1) %>%
+  mutate(stock2 = substr(ISU_CD,4,9)) %>%
   drop_na(mm)
 
 ## 4. Import Price Efficiency data
@@ -77,17 +79,21 @@ filt2= merged %>% filter(nr_trades>10)
 
 wins1 = filt2 %>%
   select(stock2, date_id, price:mktcap_bil, sig.s, sig.p, PE) %>%
-  tidyr::gather(Varname, Var, -(stock2:date_id)) %>%
+  pivot_longer(!(stock2:date_id), names_to = "Varname", values_to = "Var") %>%
   group_by(stock2, Varname) %>%
-  mutate(perc = ntile(Var,100), perc99 = quantile(Var, 0.99, na.rm=T), perc1 = quantile(Var, 0.01, na.rm=T)) %>%
-  mutate(adjVar = ifelse(perc==100, perc99, ifelse(perc==1, perc1, Var))) %>%
+  mutate(perc = ntile(Var,100), 
+         perc99 = quantile(Var, 0.99, na.rm=T), 
+         perc1 = quantile(Var, 0.01, na.rm=T)) %>%
+  mutate(adjVar = 
+           ifelse(perc==100, perc99, 
+                  ifelse(perc==1, perc1, Var))) %>%
   as.data.frame()
 
 ## 2. Transformation: Long to Wide 
 
 wins2 = wins1 %>% 
-  select(stock2, date_id, Varname, adjVar) %>%
-  tidyr::spread(Varname, adjVar)
+  select(stock2, date_id, Varname, adjVar)%>%
+  pivot_wider(names_from = Varname, values_from = adjVar)
 
 ## 3. Merge Winsorized data and dummy variables
 wins3 = 
@@ -117,8 +123,6 @@ library(dplyr)
 mydat = read.csv("./01_data/DF.csv", stringsAsFactors = F)
 monthdat = 
   mydat %>%
-  mutate(dg = ifelse(month==201603 & post_mm==1, dg+1, dg),
-         month = ifelse(month==201603 & post_mm==1, month+1, month)) %>% #assign 20160328-20160331 to the next month (dg)
   arrange(stock2, dg, date_id) %>%
   group_by(stock2, dg) %>%
   summarise(mm = mean(mm),
@@ -153,10 +157,12 @@ monthdat = read.csv("./01_data/monthdat.csv", stringsAsFactors = F)
 
 t1 = monthdat %>%
   select(mm, espread:mktcap) %>% 
-  tidyr::gather(Varname, Var, espread:mktcap)%>%
+  pivot_longer(!mm, names_to="Varname", values_to = "Var") %>%
   group_by(mm, Varname) %>%
   summarise(Mean = mean(Var, na.rm=T), Std = sd(Var, na.rm=T), Min=min(Var, na.rm=T), Max=max(Var, na.rm=T), Median=median(Var, na.rm=T)) %>% 
-  arrange(desc(mm), match(Varname, c("espread", "qspread", "rspread", "adv_selection", "amihud", "volatility", "volume", "dvolume",
+  arrange(desc(mm), 
+          match(Varname, c("espread", "qspread", "rspread", "adv_selection", 
+                           "amihud", "volatility", "volume", "dvolume",
                                      "price", "nr_trades", "ret", "mktcap"))) %>%
   ungroup() %>%
   select(-mm) %>%

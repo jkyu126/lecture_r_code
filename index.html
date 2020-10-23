@@ -1556,6 +1556,22 @@ div.tocify {
 <li>Summary stat을 만드는 코드 (리포팅 코드 맛보기)</li>
 </ul>
 </div>
+<div id="강의-자료-제-허락-없이-강의-비디오-외부-유출은-절대-하지-말아주세요.-dont-distribute-the-lecture-video-without-my-permission." class="section level2">
+<h2><span class="header-section-number">1.5</span> 강의 자료 (제 허락 없이 강의 비디오 외부 유출은 절대 하지 말아주세요. Don’t distribute the lecture video without my permission.)</h2>
+<ul>
+<li>강의록 주소: <a href="https://jkyu126.github.io/lecture_r_code/" class="uri">https://jkyu126.github.io/lecture_r_code/</a></li>
+<li>강의 리플레이: <a href="https://drive.google.com/file/d/1xQtUt-96Bi9dKkUa9ZbZiPjfa0eE82H5/view?usp=sharing" class="uri">https://drive.google.com/file/d/1xQtUt-96Bi9dKkUa9ZbZiPjfa0eE82H5/view?usp=sharing</a></li>
+<li>강의시 설명 노트: <a href="https://drive.google.com/file/d/1951boE97rmCKpnpTY07XCmtk9k1gEOZl/view?usp=sharing" class="uri">https://drive.google.com/file/d/1951boE97rmCKpnpTY07XCmtk9k1gEOZl/view?usp=sharing</a></li>
+</ul>
+</div>
+<div id="추가-자료" class="section level2">
+<h2><span class="header-section-number">1.6</span> 추가 자료</h2>
+<ul>
+<li>pivot_longer: <a href="https://tidyr.tidyverse.org/reference/pivot_longer.html" class="uri">https://tidyr.tidyverse.org/reference/pivot_longer.html</a></li>
+<li>pivot_wider: <a href="https://tidyr.tidyverse.org/reference/pivot_wider.html" class="uri">https://tidyr.tidyverse.org/reference/pivot_wider.html</a></li>
+<li>Join: <a href="https://www.guru99.com/r-dplyr-tutorial.html" class="uri">https://www.guru99.com/r-dplyr-tutorial.html</a></li>
+</ul>
+</div>
 </div>
 <div id="코드" class="section level1">
 <h1><span class="header-section-number">2</span> 코드</h1>
@@ -1572,10 +1588,12 @@ library(tidyverse)
 
 ## 1. Import shareoutstanding data (Dataguide)
 
-shrout = read.csv(&quot;./01_data/list/dataguide_shrout.csv&quot;, stringsAsFactors = F) %&gt;%
+shrout = read.csv(&quot;01_data/list/dataguide_shrout.csv&quot;, stringsAsFactors = F) %&gt;%
   select(-Symbol) %&gt;%
-  tidyr::gather(Varname, Var, starts_with(&quot;A&quot;)) %&gt;%
-  mutate(stock2 = substr(Varname, 2,7), shrout = sapply(Var, function(x) gsub(&quot;,&quot;, &quot;&quot;, x) %&gt;% as.numeric())) %&gt;%
+  pivot_longer(!date_id, names_to = &quot;Varname&quot;, values_to = &quot;Var&quot;) %&gt;%
+  mutate(stock2 = substr(Varname, 2,7), 
+         shrout = sapply(Var, function(x) gsub(&quot;,&quot;, &quot;&quot;, x) %&gt;% 
+                           as.numeric())) %&gt;%
   select(date_id, stock2, shrout) %&gt;%
   arrange(stock2, date_id) %&gt;% 
   drop_na() %&gt;%
@@ -1583,20 +1601,20 @@ shrout = read.csv(&quot;./01_data/list/dataguide_shrout.csv&quot;, stringsAsFact
 
 ## 2. Import price data (Dataguide)
 
-price = read.csv(&quot;./01_data/list/dataguide_price.csv&quot;, stringsAsFactors = F)
-for (i in 3:ncol(price)){
-  price[,i] = sapply(price[,i], function(x) gsub(&quot;,&quot;, &quot;&quot;, x))
-  price[,i] = as.numeric(price[,i])
-}
-price2 = price %&gt;% 
-  tidyr::gather(stock, price, starts_with(&quot;A&quot;)) %&gt;%
-  mutate(stock2 = substr(stock, 2,7)) %&gt;%
-  select(-Symbol, -stock) %&gt;%
-  drop_na(price)
+price2 = read.csv(&quot;01_data/list/dataguide_price.csv&quot;, stringsAsFactors = F) %&gt;%
+  select(-Symbol) %&gt;%
+  pivot_longer(!date_id, names_to = &quot;Varname&quot;, values_to = &quot;Var&quot;) %&gt;%
+  mutate(stock2 = substr(Varname, 2,7), 
+         price = sapply(Var, function(x) gsub(&quot;,&quot;, &quot;&quot;, x) %&gt;% 
+                           as.numeric())) %&gt;%
+  select(date_id, stock2, price) %&gt;%
+  arrange(stock2, date_id) %&gt;% 
+  drop_na() %&gt;%
+  as.data.frame()
 
 ## 3. Import SAS calculated files
 sas = read.csv(&quot;./01_data/summary.csv&quot;, stringsAsFactors = F) %&gt;%
-  mutate(stock2 = substr(ISU_CD,4,9), tradeday=1) %&gt;%
+  mutate(stock2 = substr(ISU_CD,4,9)) %&gt;%
   drop_na(mm)
 
 ## 4. Import Price Efficiency data
@@ -1642,17 +1660,21 @@ filt2= merged %&gt;% filter(nr_trades&gt;10)
 
 wins1 = filt2 %&gt;%
   select(stock2, date_id, price:mktcap_bil, sig.s, sig.p, PE) %&gt;%
-  tidyr::gather(Varname, Var, -(stock2:date_id)) %&gt;%
+  pivot_longer(!(stock2:date_id), names_to = &quot;Varname&quot;, values_to = &quot;Var&quot;) %&gt;%
   group_by(stock2, Varname) %&gt;%
-  mutate(perc = ntile(Var,100), perc99 = quantile(Var, 0.99, na.rm=T), perc1 = quantile(Var, 0.01, na.rm=T)) %&gt;%
-  mutate(adjVar = ifelse(perc==100, perc99, ifelse(perc==1, perc1, Var))) %&gt;%
+  mutate(perc = ntile(Var,100), 
+         perc99 = quantile(Var, 0.99, na.rm=T), 
+         perc1 = quantile(Var, 0.01, na.rm=T)) %&gt;%
+  mutate(adjVar = 
+           ifelse(perc==100, perc99, 
+                  ifelse(perc==1, perc1, Var))) %&gt;%
   as.data.frame()
 
 ## 2. Transformation: Long to Wide 
 
 wins2 = wins1 %&gt;% 
-  select(stock2, date_id, Varname, adjVar) %&gt;%
-  tidyr::spread(Varname, adjVar)
+  select(stock2, date_id, Varname, adjVar)%&gt;%
+  pivot_wider(names_from = Varname, values_from = adjVar)
 
 ## 3. Merge Winsorized data and dummy variables
 wins3 = 
@@ -1682,8 +1704,6 @@ library(dplyr)
 mydat = read.csv(&quot;./01_data/DF.csv&quot;, stringsAsFactors = F)
 monthdat = 
   mydat %&gt;%
-  mutate(dg = ifelse(month==201603 &amp; post_mm==1, dg+1, dg),
-         month = ifelse(month==201603 &amp; post_mm==1, month+1, month)) %&gt;% #assign 20160328-20160331 to the next month (dg)
   arrange(stock2, dg, date_id) %&gt;%
   group_by(stock2, dg) %&gt;%
   summarise(mm = mean(mm),
@@ -1718,10 +1738,12 @@ monthdat = read.csv(&quot;./01_data/monthdat.csv&quot;, stringsAsFactors = F)
 
 t1 = monthdat %&gt;%
   select(mm, espread:mktcap) %&gt;% 
-  tidyr::gather(Varname, Var, espread:mktcap)%&gt;%
+  pivot_longer(!mm, names_to=&quot;Varname&quot;, values_to = &quot;Var&quot;) %&gt;%
   group_by(mm, Varname) %&gt;%
   summarise(Mean = mean(Var, na.rm=T), Std = sd(Var, na.rm=T), Min=min(Var, na.rm=T), Max=max(Var, na.rm=T), Median=median(Var, na.rm=T)) %&gt;% 
-  arrange(desc(mm), match(Varname, c(&quot;espread&quot;, &quot;qspread&quot;, &quot;rspread&quot;, &quot;adv_selection&quot;, &quot;amihud&quot;, &quot;volatility&quot;, &quot;volume&quot;, &quot;dvolume&quot;,
+  arrange(desc(mm), 
+          match(Varname, c(&quot;espread&quot;, &quot;qspread&quot;, &quot;rspread&quot;, &quot;adv_selection&quot;, 
+                           &quot;amihud&quot;, &quot;volatility&quot;, &quot;volume&quot;, &quot;dvolume&quot;,
                                      &quot;price&quot;, &quot;nr_trades&quot;, &quot;ret&quot;, &quot;mktcap&quot;))) %&gt;%
   ungroup() %&gt;%
   select(-mm) %&gt;%
